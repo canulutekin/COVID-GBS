@@ -1,0 +1,468 @@
+---
+title: "Figure 3"
+author: "Can Ulutekin"
+date: "2025-05-07"
+---
+
+### Cleanup
+
+```{r}
+rm(list = ls())
+```
+
+### Packages
+
+```{r}
+library(tidyverse)
+library(openxlsx)
+library(viridis)
+library(ggforce)
+library(ggrepel)
+library(ggh4x)
+library(egg)
+library(ggprism)
+```
+
+### Custom Functions
+
+```{r}
+custom_stats_unpaired <- function(expression, comp_group, comp1, comp2){
+  x <- expression[comp_group == comp1]
+  y <- expression[comp_group == comp2]
+  
+  if(length(x) == 0 | length(y) == 0){
+    return(NA_real_)
+  }
+  
+  result <- wilcox.test(x, y, paired = FALSE)
+  return(result$p.value)
+}
+```
+
+### Color Palettes
+
+```{r}
+cp_group <- c("#449489", "#457cd6", "#945F9C", "#e34262")
+cp_marker <- c("#5D9A3C", "#2AC6C3", "#CB6CB3", "#E29140")
+```
+
+### Load Data
+
+```{r}
+data_csf <- read.xlsx(xlsxFile = "../data/data_csf.xlsx")
+data_serum <- read.xlsx(xlsxFile = "../data/data_serum.xlsx")
+marker_class <- read.xlsx(xlsxFile = "../data/marker_class.xlsx")
+md <- read.xlsx(xlsxFile = "../data/meta_data.xlsx")
+
+all_markers <- sort.default(unique(data_csf$Assay))
+```
+
+### Reformat Meta Data
+
+```{r}
+marker_class <- marker_class %>%
+  dplyr::mutate(General.Classification = factor(
+    General.Classification,
+    levels = c("Signaling Molecules", "Cytokines",
+               "Chemokines", "Growth Factors and Others")))
+
+md <- md %>%
+  dplyr::mutate(Group = factor(
+    Group, levels = c("Neuropathy-no-GBS", "Control-GBS",
+                      "COVID-GBS", "COVID-no-GBS")))
+```
+
+### Reformat Data
+
+```{r}
+data_csf <- data_csf %>%
+  dplyr::filter(QC_Warning == "Pass") %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::mutate(scaled_NPX = scale(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::relocate(scaled_NPX, .after = "NPX") %>%
+  
+  ### Two Patient_03 Samples in CSF Data in one run (lets average it out)
+  dplyr::group_by(PatientID, Assay, Run) %>%
+  dplyr::mutate(scaled_NPX = mean(scaled_NPX)) %>%
+  dplyr::mutate(NPX = mean(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::distinct()
+
+data_serum <- data_serum %>%
+  dplyr::filter(QC_Warning == "Pass") %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::mutate(scaled_NPX = scale(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::relocate(scaled_NPX, .after = "NPX")
+
+dual_run_patients_csf <- data_csf %>%
+  dplyr::select(PatientID, Run) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(PatientID) %>%
+  dplyr::group_by(PatientID) %>%
+  dplyr::add_tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(n > 1) %>%
+  dplyr::select(PatientID) %>%
+  dplyr::distinct() %>%
+  .$PatientID
+
+dual_run_patients_serum <- data_serum %>%
+  dplyr::select(PatientID, Run) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(PatientID) %>%
+  dplyr::group_by(PatientID) %>%
+  dplyr::add_tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(n > 1) %>%
+  dplyr::select(PatientID) %>%
+  dplyr::distinct() %>%
+  .$PatientID
+```
+
+### Figure 3A
+
+```{r}
+pc_chosen <- c(1, 2) ### EDIT
+
+PC_x <- paste0("PC", pc_chosen[1])
+PC_y <- paste0("PC", pc_chosen[2])
+
+### REFORMAT DATA
+data_pca <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS",
+                             "COVID-no-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Control-GBS", "COVID-GBS", "COVID-no-GBS")))
+
+### Select Markers for PCA with Below LOD Frequencies Below 30%
+viable_markers <- data_pca %>%
+  dplyr::select(PatientID, Assay, NPX, LOD) %>%
+  dplyr::mutate(belowLOD = if_else(NPX < LOD, 1, 0, NA_real_)) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    belowLOD_count = sum(belowLOD),
+    total_count = n()
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(belowLOD_freq = 100 * belowLOD_count / total_count) %>%
+  dplyr::filter(belowLOD_freq <= 30) %>%
+  .$Assay
+
+### Generate PCA Input Data
+data_pca_input <- data_pca %>%
+  dplyr::filter(Assay %in% viable_markers) %>%
+  dplyr::select(PatientID, Group, Assay, scaled_NPX) %>%
+  tidyr::pivot_wider(names_from = "Assay", values_from = "scaled_NPX")
+
+### Convert to Matrix
+mat_pca_input <- data_pca_input %>%
+  dplyr::select(c(PatientID, all_of(viable_markers))) %>%
+  tibble::column_to_rownames(var = "PatientID") %>%
+  as.matrix()
+
+### Run PCA
+pca <- prcomp(mat_pca_input)
+
+### PCA Output
+var_explained <- pca$sdev^2 / sum(pca$sdev^2)
+
+data_pca_output <- data.frame(PatientID=row.names(pca$x), pca$x)
+
+### Marker Vectors
+variable_markers <- as.data.frame(pca$rotation) %>%
+  dplyr::select(all_of(c(PC_x, PC_y))) %>%
+  dplyr::mutate(dot_product = sqrt((get(PC_x)^2)+(get(PC_y)^2))) %>%
+  dplyr::arrange(desc(dot_product)) %>%
+  dplyr::slice_max(order_by = dot_product, n = 18) %>%
+  tibble::rownames_to_column(var = "Assay") %>%
+  .$Assay
+
+data_rotation <- data.frame(Assay=rownames(pca$rotation), pca$rotation)
+
+mult <- min(
+  (max(data_pca_output[,PC_y]) - min(data_pca_output[,PC_y])/(max(data_rotation[,PC_y])-min(data_rotation[,PC_y]))),
+  (max(data_pca_output[,PC_x]) - min(data_pca_output[,PC_x])/(max(data_rotation[,PC_x])-min(data_rotation[,PC_x])))
+)
+
+data_rotation <- transform(data_rotation,
+                           v1 = 10 * mult * get(PC_x),
+                           v2 = 10 * mult * get(PC_y)
+)
+
+data_rotation <- data_rotation %>%
+  dplyr::filter(Assay %in% variable_markers) %>%
+  dplyr::left_join(marker_class, by = "Assay")
+
+### Plot PCA
+data_plot <- data_pca_output %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::left_join(data_pca_input %>%
+                     dplyr::select(PatientID) %>%
+                     dplyr::distinct(),
+                   by = "PatientID")
+
+p <- ggplot(data_plot, aes(x = get(PC_x), y = get(PC_y))) +
+  geom_hline(yintercept = 0, linewidth=.2, col = "gray") +
+  geom_vline(xintercept = 0, linewidth=.2, col = "gray") +
+  stat_ellipse(aes(col = Group), level = 0.8, linewidth = 1.5) +
+  geom_point(aes(fill = Group), shape = 21, color = "black", size = 7) +
+  coord_fixed() +
+  xlab(label = paste0(PC_x, " (", round(100 * var_explained[pc_chosen[1]], digits = 1), "%)")) +
+  ylab(label = paste0(PC_y, " (", round(100 * var_explained[pc_chosen[2]], digits = 1), "%)")) +
+  # ggtitle(label = "CSF") +
+  scale_color_manual(values = c("#457cd6", "#945F9C", "#e34262")) +
+  scale_fill_manual(values = c("#457cd6", "#945F9C", "#e34262")) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.text = element_text(size = 15),
+        axis.title = element_text(size = 18))
+
+r_val <- max(sqrt(c(data_rotation$v1^2 + data_rotation$v2^2)))
+
+data_rotation_circle <- data.frame(x0 = 0, y0 = 0,
+                                   r = r_val)
+
+q <- ggplot() +
+  geom_segment(data = data_rotation_circle,
+               mapping = aes(y = -r, yend = r), x = 0, xend = 0, col ="gray") +
+  geom_segment(data = data_rotation_circle,
+               mapping = aes(x = -r, xend = r), y = 0, yend = 0, col ="gray") +
+  geom_circle(data = data_rotation_circle,
+              mapping = aes(x0 = x0, y0 = y0, r = r), linewidth = 1) +
+  geom_segment(data = data_rotation,
+               mapping = aes(xend = v1, yend = v2, color = General.Classification),
+               x = 0, y = 0, linewidth = 1,
+               arrow = arrow(length = unit(0.2, "cm"))) +
+  ggrepel::geom_label_repel(data = data_rotation,
+                            mapping = aes(x = v1, y = v2, color = General.Classification,
+                                          label = Assay), size = 7, max.overlaps = 15) +
+  coord_fixed() +
+  xlab(PC_x) +
+  ylab(PC_y) +
+  scale_color_manual(values = c("#5D9A3C", "#2AC6C3", "#CB6CB3", "#E29140")) +
+  theme_minimal() +
+  theme(axis.text = element_blank(),
+        axis.title = element_text(size = 20),
+        panel.grid = element_blank())
+
+pdf(file = "../figures/Figure3A.pdf", width = 10)
+print(p)
+print(q)
+invisible(dev.off())
+
+rm(data_pca, data_pca_input, data_pca_output, data_plot, mat_pca_input, p,
+   pca, var_explained, viable_markers, data_rotation, mult,
+   variable_markers, r_val, data_rotation_circle, q, pc_chosen, PC_x, PC_y) # cleanup
+```
+
+### Figure 3B
+
+```{r}
+degrees <- 300 ### EDIT
+
+### REFORMAT DATA
+data_heatmap <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS",
+                             "COVID-no-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Control-GBS", "COVID-no-GBS", "COVID-GBS"))) %>%
+  dplyr::group_by(Assay, Group) %>%
+  dplyr::summarise(
+    mean_NPX = mean(scaled_NPX, na.rm = TRUE)
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::left_join(marker_class, by = "Assay") %>%
+  dplyr::arrange(General.Classification, Assay, Group) %>%
+  dplyr::mutate(Group_num = case_when(
+    Group == "Control-GBS" ~ 1,
+    Group == "COVID-no-GBS" ~ 2,
+    Group == "COVID-GBS" ~ 3,
+  )) %>%
+  dplyr::arrange(General.Classification, Assay, Group_num)
+
+### PLOT
+
+pdf(file = "../figures/Figure3B.pdf", width = 12, height = 12)
+for (i in levels(marker_class$General.Classification)) {
+  data_heatmap_temp <- data_heatmap %>%
+    dplyr::filter(General.Classification == i) %>%
+    dplyr::group_by(Group) %>%
+    dplyr::mutate(Assay_num = 1:n()) %>%
+    dplyr::ungroup()
+  
+  n_rows <- length(unique(data_heatmap_temp$Group))
+  n_markers <- length(unique(data_heatmap_temp$Assay))
+  
+  data_heatmap_temp_axis <- data_heatmap_temp %>%
+    dplyr::select(Assay, Assay_num) %>%
+    dplyr::distinct() %>%
+    dplyr::arrange(Assay) %>%
+    dplyr::mutate(angle = 90 - seq(0.5, n_markers - 0.5, 1) * degrees / n_markers) %>%
+    dplyr::mutate(angle = if_else(angle < 0, angle + 360, angle , NA_real_)) %>%
+    dplyr::mutate(hjust = if_else(angle > 90 & angle < 270, 1, 0, NA_real_)) %>%
+    dplyr::mutate(angle = if_else(angle > 90 & angle < 270, angle - 180, angle, NA_real_)) %>%
+    dplyr::mutate(angle = if_else(angle < 0, angle + 360, angle , NA_real_))
+  
+  p <- ggplot(data_heatmap_temp,
+              aes(x = Assay_num, y = Group_num)) +
+    geom_tile(aes(fill = mean_NPX)) +
+    geom_text(data = data.frame(x = ((360/degrees) * n_markers) + 0.5, y = 1:n_rows),
+              mapping = aes(x = x, y = y),
+              label = c("Control-GBS ", "COVID-no-GBS ", "COVID-GBS "),
+              hjust = 1, size = 12) +
+    geom_segment(data = data.frame(x = 0:n_markers + 0.5, xend = 0:n_markers + 0.5,
+                                   y = 0.5, yend = n_rows + 0.5),
+                 mapping = aes(x = x, xend = xend, y = y, yend = yend), linewidth = 1.5) +
+    geom_segment(data = data.frame(x = 0.5, xend = n_markers + 0.5,
+                                   y = 0:n_rows + 0.5, yend = 0:n_rows + 0.5),
+                 mapping = aes(x = x, xend = xend, y = y, yend = yend), linewidth = 1.5) +
+    geom_text(data = data_heatmap_temp_axis,
+              mapping = aes(x = Assay_num, label = Assay,
+                            angle = angle, hjust = hjust),
+              y = n_rows + 0.6, size = 9) +
+    coord_polar() +
+    scale_y_continuous(limits = c(-n_rows, n_rows + 1.5)) +
+    scale_x_continuous(limits = c(0.5, ((360/degrees) * n_markers) + 0.5),
+                       breaks = 1:n_markers,
+                       labels = unique(data_heatmap_temp$Assay),
+                       name = 'Scaled Mean NPX') +
+    scale_fill_viridis(option = "B", limits = c(-1.6, 1.6)) +
+    theme_void(base_size = 16) +
+    theme(axis.text.x = element_blank(),
+          axis.title = element_blank(),
+          plot.title = element_text(hjust = 0.5, size = 32))
+  
+  print(p)
+}
+invisible(dev.off())
+
+rm(degrees, i, n_rows, n_markers, p,
+   data_heatmap, data_heatmap_temp, data_heatmap_temp_axis) # cleanup
+```
+
+### Figure 3C
+
+```{r}
+### REFORMAT DATA
+data_boxplot <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS",
+                             "COVID-no-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Control-GBS", "COVID-GBS", "COVID-no-GBS"))) %>%
+  dplyr::select(PatientID, Group, Assay, scaled_NPX) %>%
+  dplyr::left_join(marker_class, by = "Assay") %>%
+  dplyr::arrange(General.Classification, Assay, Group) %>%
+  dplyr::mutate(General.Classification = factor(General.Classification,
+                                                levels = c("Signaling Molecules",
+                                                           "Cytokines",
+                                                           "Chemokines",
+                                                           "Growth Factors and Others")))
+
+data_boxplot_stat <- data_boxplot %>%
+  dplyr::group_by(Assay, General.Classification) %>%
+  dplyr::summarise(
+    pval_GBS = custom_stats_unpaired(scaled_NPX, Group, "Control-GBS", "COVID-GBS"),
+    pval_COVID = custom_stats_unpaired(scaled_NPX, Group, "COVID-no-GBS", "COVID-GBS")
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(General.Classification, Assay) %>%
+  dplyr::group_by(General.Classification) %>%
+  dplyr::mutate(pval_GBS_corrected = p.adjust(pval_GBS, method = "BH")) %>%
+  dplyr::mutate(pval_COVID_corrected = p.adjust(pval_COVID, method = "BH")) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(pval_GBS_corrected <= 0.05 | pval_COVID_corrected <= 0.05)
+
+data_plot <- data_boxplot %>%
+  dplyr::filter(Assay %in% data_boxplot_stat$Assay)
+
+data_plot_stat <- data_boxplot_stat %>%
+  dplyr::select(-c("pval_GBS", "pval_COVID")) %>%
+  tidyr::pivot_longer(cols = c("pval_GBS_corrected", "pval_COVID_corrected"),
+                      names_to = "Group", values_to = "pval_corrected") %>%
+  dplyr::mutate(Group = stringr::str_remove(Group, "pval_")) %>%
+  dplyr::mutate(Group = stringr::str_remove(Group, "_corrected")) %>%
+  dplyr::mutate(pval_corrected = signif(pval_corrected, 2)) %>%
+  dplyr::mutate(xmin = if_else(Group == "GBS",
+                               "Control-GBS", "COVID-GBS",
+                               NA_character_)) %>%
+  dplyr::mutate(xmax = if_else(Group == "GBS",
+                               "COVID-GBS", "COVID-no-GBS",
+                               NA_character_)) %>%
+  dplyr::left_join(
+    data_plot %>%
+      dplyr::group_by(Assay) %>%
+      dplyr::summarise(
+        y_max = max(scaled_NPX, na.rm = TRUE),
+        y_min = min(scaled_NPX, na.rm = TRUE)
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(y_max = max(y_max)) %>%
+      dplyr::mutate(y_min = min(y_min)) %>%
+      dplyr::mutate(y_pos = y_min + 1.05*(y_max-y_min)),
+    by = "Assay"
+  ) %>%
+  dplyr::mutate(y_pos = if_else(Group == "GBS", y_pos,
+                                y_min + 1.15*(y_max-y_min), NA_real_))
+
+# Create individual lists with the required number of repetitions
+  rect_list_1 <- rep(list(element_rect(fill = "#5D9A3C")), 1) ### Signaling Molecules
+  rect_list_2 <- rep(list(element_rect(fill = "#2AC6C3")), 1) ### Cytokines
+  rect_list_3 <- rep(list(element_rect(fill = "#CB6CB3")), 1) ### Chemokines
+  rect_list_4 <- rep(list(element_rect(fill = "#E29140")), 0) ### Growth Factors and Others
+  rect_list_5 <- rep(list(element_rect(fill = "white")), 1000) ### Assays
+  
+  background_fill <- c(rect_list_1, rect_list_2, rect_list_3, rect_list_4, rect_list_5)
+
+p <- ggplot(data_plot) +
+  facet_wrap2(General.Classification~Assay, nrow = 1,
+              strip = strip_nested(bleed = FALSE, background_x = background_fill)) +
+  add_pvalue(data_plot_stat %>%
+               dplyr::filter(Group == "GBS"),
+             xmin = "xmin",
+             xmax = "xmax",
+             label = "pval_corrected",
+             y.position = "y_pos",
+             tip.length = 0,
+             step.group.by = "Assay",
+             bracket.size = 0.5) +
+  add_pvalue(data_plot_stat %>%
+               dplyr::filter(Group == "COVID"),
+             xmin = "xmin",
+             xmax = "xmax",
+             label = "pval_corrected",
+             y.position = "y_pos",
+             tip.length = 0,
+             step.group.by = "Assay",
+             bracket.size = 0.5) +
+  geom_boxplot(aes(x = Group, y = scaled_NPX, fill = Group), outlier.alpha = 0) +
+  geom_jitter(aes(x = Group, y = scaled_NPX), width = 0.25, height = 0, size = 1) +
+  scale_y_continuous(expand = expansion(mult = 0.08)) +
+  scale_fill_manual(values = c("#457cd6", "#945F9C", "#e34262")) +
+  ylab(label = "normalized protein abundance") +
+  guides(fill=guide_legend(title = "Patient Group")) +
+  theme_bw() +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+width_in_cm <- 2.7 ### EDIT
+height_in_cm <- 7 ### EDIT
+
+p_fixed <- set_panel_size(p, width  = unit(width_in_cm, "cm"),
+                          height = unit(height_in_cm, "cm"))
+
+ggsave(p_fixed, filename = "../figures/Figure3C.pdf", width = 16, height = 6)
+
+rm(data_boxplot, data_boxplot_stat, data_plot, background_fill,
+   p, p_fixed, width_in_cm, height_in_cm) # cleanup
+rm(list = ls(pattern = "rect_list_")) # cleanup
+```

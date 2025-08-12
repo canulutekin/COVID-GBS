@@ -1,0 +1,1014 @@
+---
+title: "Figure S2"
+author: "Can Ulutekin"
+date: "2025-05-08"
+---
+
+### Cleanup
+
+```{r}
+rm(list = ls())
+```
+
+### Packages
+
+```{r}
+library(tidyverse)
+library(openxlsx)
+library(ggrepel)
+library(ggh4x)
+library(egg)
+library(ggprism)
+```
+
+### Custom Functions
+
+```{r}
+custom_stats_unpaired <- function(expression, comp_group, comp1, comp2){
+  x <- expression[comp_group == comp1]
+  y <- expression[comp_group == comp2]
+  
+  if(length(x) == 0 | length(y) == 0){
+    return(NA_real_)
+  }
+  
+  result <- wilcox.test(x, y, paired = FALSE)
+  return(result$p.value)
+}
+
+custom_effsize <- function(expression, comp_group, comp1, comp2){
+  x <- expression[comp_group == comp1]
+  y <- expression[comp_group == comp2]
+  
+  if(length(x) == 0 | length(y) == 0){
+    return(NA_real_)
+  }
+  
+  result <- lsr::cohensD(x, y)
+  return(result)
+}
+
+custom_sign <- function(expression, comp_group, comp1, comp2){
+  x <- expression[comp_group == comp1]
+  y <- expression[comp_group == comp2]
+  
+  if(length(x) == 0 | length(y) == 0){
+    return(NA_real_)
+  }
+  
+  result <- sign(mean(y) - mean(x))
+  return(result)
+}
+```
+
+### Custom Radial Bar Plot
+
+```{r}
+custom_radial_bar_plot <- function(data, group_major_name, group_minor_name,
+                                   y_axis_name, fill_name, cp,
+                                   group_major_order = NULL,
+                                   group_minor_order = NULL, fill_order = NULL,
+                                   external_circle, y_min_circle, y_rect_start,
+                                   y_rect_end, y_tick_start, y_tick_end,
+                                   y_text_pos, y_text_size, y_text_cutoff,
+                                   max_scale_shift = 0){
+  
+  min_scale <- min(y_min_circle, y_rect_start, y_rect_end,
+                   y_tick_start, y_tick_end, y_text_pos)
+  max_scale <- max(y_min_circle, y_rect_start, y_rect_end,
+                   y_tick_start, y_tick_end, y_text_pos)
+  max_scale <- max_scale + max_scale_shift
+  
+  data_plot <- data %>%
+    dplyr::select(
+      all_of(group_major_name),
+      all_of(group_minor_name),
+      all_of(y_axis_name),
+      all_of(fill_name)
+    ) %>%
+    dplyr::rename(
+      group_major = !!sym(group_major_name),
+      group_minor = !!sym(group_minor_name),
+      y_axis = !!sym(y_axis_name),
+      fill = !!sym(fill_name)
+    )
+  
+  n_group_major <- length(unique(data_plot$group_major))
+  n_group_minor <- length(unique(data_plot$group_minor))
+  
+  if(is.null(group_major_order)){
+    group_major_order <- unique(as.character(data_plot$group_major))
+  }
+  
+  if(is.null(group_minor_order)){
+    group_minor_order <- unique(as.character(data_plot$group_minor))
+  }
+  
+  if(is.null(fill_order)){
+    fill_order <- unique(as.character(data_plot$fill))
+  }
+  
+  n_group_major_minor <- data_plot %>% dplyr::group_by(group_major) %>% dplyr::tally() %>% dplyr::ungroup() %>% .$n
+  
+  data_plot <- data_plot %>%
+    dplyr::mutate(
+      group_major = factor(group_major, levels = group_major_order),
+      group_minor = factor(group_minor, levels = group_minor_order),
+      fill        = factor(fill,        levels = fill_order)
+    ) %>%
+    dplyr::mutate(x_axis = group_minor) %>%
+    dplyr::mutate(x_axis = factor(x_axis, levels = group_minor_order)) %>%
+    dplyr::arrange(x_axis) %>%
+    dplyr::mutate(text = if_else(y_axis >= y_text_cutoff,
+                                 group_minor, NA_character_, NA_character_)) %>%
+    dplyr::mutate(x_axis_text = 1:length(pull(., x_axis))) %>%
+    dplyr::mutate(x_axis_text = if_else(!is.na(text), x_axis_text,
+                                        NA_integer_, NA_integer_)) %>%
+    dplyr::mutate(angle = 90 - (360/(n_group_minor)) * (x_axis_text - 0.5)) %>%
+    dplyr::mutate(angle = if_else(angle < 0, angle + 360, angle, NA_real_)) %>%
+    dplyr::mutate(hjust = if_else(angle <= 90 | angle >= 270, 0, 1, NA_real_)) %>%
+    dplyr::mutate(angle = if_else(angle <= 90 | angle >= 270, angle, angle + 180, NA_real_))
+  
+  data_plot_lines <- data.frame(
+    x = 0.5 + cumsum(n_group_major_minor),
+    xend = 0.5 + cumsum(n_group_major_minor),
+    y = 0, yend = max(external_circle))
+  
+  data_plot_rects <- data.frame(
+    xmin = 0.5 + cumsum(n_group_major_minor)[1:n_group_major] - n_group_major_minor,
+    xmax = 0.5 + cumsum(n_group_major_minor)[1:n_group_major],
+    ymin = y_rect_start, ymax = y_rect_end,
+    group = levels(data_plot$group_major)
+  )
+  
+  p <- ggplot() +
+    geom_point(data = data_plot, ### establish x-axis
+               aes(x = x_axis, y = 0), alpha = 0) +
+    geom_rect(data = data_plot_rects,
+              aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax,
+                  fill = group), color = "black")
+    
+  for (i in external_circle) {
+    p <- p +
+      geom_hline(yintercept = i, linetype = "dashed")
+  }
+  
+  p <- p +
+    geom_segment(data = data_plot,
+                 aes(x = x_axis_text, xend = x_axis_text),
+                 y = y_tick_start, yend = y_tick_end) +
+    geom_col(data = data_plot,
+             aes(x = x_axis, y = y_axis, fill = fill), col = "black") +
+    geom_segment(data = data_plot_lines,
+                 aes(x = x, xend = x, y = y, yend = yend)) +
+    geom_segment(data = data_plot_lines,
+                 aes(x = x, xend = xend), y = y_rect_start, yend = y_rect_end) +
+    geom_text(data = data_plot,
+              aes(x = x_axis, y = y_text_pos, label = text,
+                  angle = angle, hjust = hjust), size = y_text_size) +
+    
+    scale_y_continuous(limits = c(min_scale, max_scale)) +
+    scale_fill_manual(values = cp, breaks = c(fill_order, group_major_order)) +
+    guides(fill = guide_legend(title = "Marker Classification")) +
+    coord_polar() +
+    theme_void()
+  
+  return(p)
+}
+```
+
+### Color Palettes
+
+```{r}
+cp_group <- c("#449489", "#457cd6", "#945F9C", "#e34262")
+cp_marker <- c("#5D9A3C", "#2AC6C3", "#CB6CB3", "#E29140")
+```
+
+### Load Data
+
+```{r}
+data_csf <- read.xlsx(xlsxFile = "../data/data_csf.xlsx")
+data_serum <- read.xlsx(xlsxFile = "../data/data_serum.xlsx")
+marker_class <- read.xlsx(xlsxFile = "../data/marker_class.xlsx")
+md <- read.xlsx(xlsxFile = "../data/meta_data.xlsx")
+
+all_markers <- sort.default(unique(data_csf$Assay))
+```
+
+### Reformat Meta Data
+
+```{r}
+marker_class <- marker_class %>%
+  dplyr::mutate(General.Classification = factor(
+    General.Classification,
+    levels = c("Signaling Molecules", "Cytokines",
+               "Chemokines", "Growth Factors and Others")))
+
+md <- md %>%
+  dplyr::mutate(Group = factor(
+    Group, levels = c("Neuropathy-no-GBS", "Control-GBS",
+                      "COVID-GBS", "COVID-no-GBS")))
+```
+
+### Reformat Data
+
+```{r}
+data_csf <- data_csf %>%
+  dplyr::filter(QC_Warning == "Pass") %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::mutate(scaled_NPX = scale(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::relocate(scaled_NPX, .after = "NPX") %>%
+  
+  ### Two Patient_03 Samples in CSF Data in one run (lets average it out)
+  dplyr::group_by(PatientID, Assay, Run) %>%
+  dplyr::mutate(scaled_NPX = mean(scaled_NPX)) %>%
+  dplyr::mutate(NPX = mean(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::distinct()
+
+data_serum <- data_serum %>%
+  dplyr::filter(QC_Warning == "Pass") %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::mutate(scaled_NPX = scale(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::relocate(scaled_NPX, .after = "NPX")
+
+dual_run_patients_csf <- data_csf %>%
+  dplyr::select(PatientID, Run) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(PatientID) %>%
+  dplyr::group_by(PatientID) %>%
+  dplyr::add_tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(n > 1) %>%
+  dplyr::select(PatientID) %>%
+  dplyr::distinct() %>%
+  .$PatientID
+
+dual_run_patients_serum <- data_serum %>%
+  dplyr::select(PatientID, Run) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(PatientID) %>%
+  dplyr::group_by(PatientID) %>%
+  dplyr::add_tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(n > 1) %>%
+  dplyr::select(PatientID) %>%
+  dplyr::distinct() %>%
+  .$PatientID
+```
+
+### Figure S2A-CSF
+
+```{r}
+pc_chosen <- c(1, 2) ### EDIT
+
+PC_x <- paste0("PC", pc_chosen[1])
+PC_y <- paste0("PC", pc_chosen[2])
+
+### REFORMAT DATA
+data_pca <- data_csf %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_csf & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Neuropathy-no-GBS",
+                                                 "Control-GBS",
+                                                 "COVID-GBS",
+                                                 "COVID-no-GBS"))) %>%
+  dplyr::mutate(Cohort = factor(Cohort, levels = c("Zurich", "Bern",
+                                                   "Hebron", "Santa Pau")))
+
+### Select Markers for PCA with Below LOD Frequencies Below 30%
+viable_markers <- data_pca %>%
+  dplyr::select(PatientID, Assay, NPX, LOD) %>%
+  dplyr::mutate(belowLOD = if_else(NPX < LOD, 1, 0, NA_real_)) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    belowLOD_count = sum(belowLOD),
+    total_count = n()
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(belowLOD_freq = 100 * belowLOD_count / total_count) %>%
+  dplyr::filter(belowLOD_freq <= 30) %>%
+  .$Assay
+
+### Generate PCA Input Data
+data_pca_input <- data_pca %>%
+  dplyr::filter(Assay %in% viable_markers) %>%
+  dplyr::select(PatientID, Cohort, Group, Assay, scaled_NPX) %>%
+  tidyr::pivot_wider(names_from = "Assay", values_from = "scaled_NPX")
+
+### Convert to Matrix
+mat_pca_input <- data_pca_input %>%
+  dplyr::select(c(PatientID, all_of(viable_markers))) %>%
+  tibble::column_to_rownames(var = "PatientID") %>%
+  as.matrix()
+
+### Run PCA
+pca <- prcomp(mat_pca_input)
+
+### PCA Output
+var_explained <- pca$sdev^2 / sum(pca$sdev^2)
+
+data_pca_output <- data.frame(PatientID=row.names(pca$x), pca$x)
+
+### Plot PCA
+data_plot <- data_pca_output %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::left_join(data_pca_input %>%
+                     dplyr::select(PatientID) %>%
+                     dplyr::distinct(),
+                   by = "PatientID") %>%
+  dplyr::mutate(Cohort = factor(Cohort, levels = c("Zurich", "Bern", "Hebron", "Santa Pau")))
+
+rect_list_1 <- rep(list(element_rect(fill = "#449489")), 1)
+rect_list_2 <- rep(list(element_rect(fill = "#457cd6")), 1)
+rect_list_3 <- rep(list(element_rect(fill = "#945F9C")), 1)
+rect_list_4 <- rep(list(element_rect(fill = "#e34262")), 1)
+rect_list_5 <- rep(list(element_rect(fill = "white")), 1000) ### For the markers
+
+# Combine the lists into a single list
+background_fill <- c(rect_list_1, rect_list_2, rect_list_3, rect_list_4, rect_list_5)
+
+
+p <- ggplot(data_plot, aes(x = get(PC_x), y = get(PC_y))) +
+  facet_wrap2(~Group, nrow = 2,
+              strip = strip_nested(bleed = FALSE, background_x = background_fill)) +
+  geom_hline(yintercept = 0, linewidth=.2, col = "gray") +
+  geom_vline(xintercept = 0, linewidth=.2, col = "gray") +
+  geom_point(aes(fill = Cohort), shape = 21, color = "black", size = 5) +
+  coord_fixed() +
+  xlab(label = paste0(PC_x, " (", round(100 * var_explained[pc_chosen[1]], digits = 1), "%)")) +
+  ylab(label = paste0(PC_y, " (", round(100 * var_explained[pc_chosen[2]], digits = 1), "%)")) +
+  scale_color_manual(values = cp_marker) +
+  scale_fill_manual(values = cp_marker) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.text = element_text(size = 15),
+        axis.title = element_text(size = 18))
+
+pdf(file = "../figures/FigureS2A-CSF.pdf", width = 11)
+print(p)
+invisible(dev.off())
+
+rm(data_pca, data_pca_input, data_pca_output, data_plot, mat_pca_input, p,
+   pca, var_explained, viable_markers, pc_chosen, PC_x, PC_y) # cleanup
+rm(list = ls(pattern = "rect_list_")) # cleanup
+```
+
+### Figure S2A-Serum
+
+```{r}
+pc_chosen <- c(1, 2) ### EDIT
+
+PC_x <- paste0("PC", pc_chosen[1])
+PC_y <- paste0("PC", pc_chosen[2])
+
+### REFORMAT DATA
+data_pca <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Neuropathy-no-GBS",
+                                                 "Control-GBS",
+                                                 "COVID-GBS",
+                                                 "COVID-no-GBS"))) %>%
+  dplyr::mutate(Cohort = factor(Cohort, levels = c("Zurich", "Bern",
+                                                   "Hebron", "Santa Pau")))
+
+### Select Markers for PCA with Below LOD Frequencies Below 30%
+viable_markers <- data_pca %>%
+  dplyr::select(PatientID, Assay, NPX, LOD) %>%
+  dplyr::mutate(belowLOD = if_else(NPX < LOD, 1, 0, NA_real_)) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    belowLOD_count = sum(belowLOD),
+    total_count = n()
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(belowLOD_freq = 100 * belowLOD_count / total_count) %>%
+  dplyr::filter(belowLOD_freq <= 30) %>%
+  .$Assay
+
+### Generate PCA Input Data
+data_pca_input <- data_pca %>%
+  dplyr::filter(Assay %in% viable_markers) %>%
+  dplyr::select(PatientID, Cohort, Group, Assay, scaled_NPX) %>%
+  tidyr::pivot_wider(names_from = "Assay", values_from = "scaled_NPX")
+
+### Convert to Matrix
+mat_pca_input <- data_pca_input %>%
+  dplyr::select(c(PatientID, all_of(viable_markers))) %>%
+  tibble::column_to_rownames(var = "PatientID") %>%
+  as.matrix()
+
+### Run PCA
+pca <- prcomp(mat_pca_input)
+
+### PCA Output
+var_explained <- pca$sdev^2 / sum(pca$sdev^2)
+
+data_pca_output <- data.frame(PatientID=row.names(pca$x), pca$x)
+
+### Plot PCA
+data_plot <- data_pca_output %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::left_join(data_pca_input %>%
+                     dplyr::select(PatientID) %>%
+                     dplyr::distinct(),
+                   by = "PatientID") %>%
+  dplyr::mutate(Cohort = factor(Cohort, levels = c("Zurich", "Bern", "Hebron", "Santa Pau")))
+
+rect_list_1 <- rep(list(element_rect(fill = "#449489")), 1)
+rect_list_2 <- rep(list(element_rect(fill = "#457cd6")), 1)
+rect_list_3 <- rep(list(element_rect(fill = "#945F9C")), 1)
+rect_list_4 <- rep(list(element_rect(fill = "#e34262")), 1)
+rect_list_5 <- rep(list(element_rect(fill = "white")), 1000) ### For the markers
+
+# Combine the lists into a single list
+background_fill <- c(rect_list_1, rect_list_2, rect_list_3, rect_list_4, rect_list_5)
+
+
+p <- ggplot(data_plot, aes(x = get(PC_x), y = get(PC_y))) +
+  facet_wrap2(~Group, nrow = 2,
+              strip = strip_nested(bleed = FALSE, background_x = background_fill)) +
+  geom_hline(yintercept = 0, linewidth=.2, col = "gray") +
+  geom_vline(xintercept = 0, linewidth=.2, col = "gray") +
+  geom_point(aes(fill = Cohort), shape = 21, color = "black", size = 5) +
+  coord_fixed() +
+  xlab(label = paste0(PC_x, " (", round(100 * var_explained[pc_chosen[1]], digits = 1), "%)")) +
+  ylab(label = paste0(PC_y, " (", round(100 * var_explained[pc_chosen[2]], digits = 1), "%)")) +
+  scale_color_manual(values = cp_marker) +
+  scale_fill_manual(values = cp_marker) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.text = element_text(size = 15),
+        axis.title = element_text(size = 18))
+
+pdf(file = "../figures/FigureS2A-Serum.pdf", width = 11)
+print(p)
+invisible(dev.off())
+
+rm(data_pca, data_pca_input, data_pca_output, data_plot, mat_pca_input, p,
+   pca, var_explained, viable_markers, pc_chosen, PC_x, PC_y, background_fill) # cleanup
+rm(list = ls(pattern = "rect_list_")) # cleanup
+```
+
+### Figure S2B-RadialBarPlot
+
+```{r}
+data_plot <- data_csf
+
+viable_markers <- data_plot %>%
+  dplyr::select(PatientID, Assay, NPX, LOD) %>%
+  dplyr::mutate(belowLOD = if_else(NPX < LOD, 1, 0, NA_real_)) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    belowLOD_count = sum(belowLOD),
+    total_count = n()
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(belowLOD_freq = 100 * belowLOD_count / total_count) %>%
+  dplyr::filter(belowLOD_freq <= 30) %>%
+  .$Assay
+
+data_plot <- data_plot %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS",
+                             "Neuropathy-no-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_csf & Run == 2)) %>%
+  dplyr::mutate(Group = if_else(Group %in% c("COVID-GBS", "Control-GBS"),
+                                "GBS", "Neuropathy-no-GBS", NA_character_)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Neuropathy-no-GBS", "GBS"))) %>%
+  dplyr::left_join(marker_class, by = "Assay") %>%
+  dplyr::arrange(General.Classification, Assay, Group) %>%
+  dplyr::filter(Assay %in% viable_markers) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    pval = custom_stats_unpaired(scaled_NPX, Group, "Neuropathy-no-GBS", "GBS"),
+    effsize = custom_effsize(scaled_NPX, Group, "Neuropathy-no-GBS", "GBS"),
+    sign = custom_sign(scaled_NPX, Group, "Neuropathy-no-GBS", "GBS")
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::left_join(marker_class, by = "Assay") %>%
+  dplyr::group_by(General.Classification) %>%
+  dplyr::mutate(pval_corrected = p.adjust(pval, method = "BH")) %>%
+  dplyr::ungroup() %>%
+  dplyr::relocate(pval_corrected, .after = pval) %>%
+  dplyr::arrange(desc(effsize)) %>%
+  dplyr::mutate(Assay = factor(Assay, levels = .data$Assay)) %>%
+  dplyr::mutate(Assay_effsize = if_else(effsize >= 0.8, Assay,
+                                        NA_character_, NA_character_)) %>%
+  dplyr::mutate(Assay_Class_effsize = if_else(effsize >= 0.8,
+                                              General.Classification,
+                                              NA_character_, NA_character_)) %>%
+  dplyr::mutate(Assay_Class_effsize = factor(
+    Assay_Class_effsize, levels = levels(marker_class$General.Classification))
+  )
+
+p <- custom_radial_bar_plot(
+  data_plot,
+  group_major_name = "General.Classification",
+  group_minor_name = "Assay",
+  y_axis_name = "effsize",
+  fill_name = "sign",
+  cp = c("#285cff", "#f64d4d", cp_marker),
+  group_major_order = c("Signaling Molecules", "Cytokines", "Chemokines", "Growth Factors and Others"),
+  group_minor_order = data_plot %>% dplyr::arrange(General.Classification, desc(effsize)) %>% .$Assay,
+  fill_order = c(-1, 1),
+  external_circle = 0.8,
+  y_min_circle = -0.5,
+  y_rect_start = 0, y_rect_end = -0.1,
+  y_tick_start = 1.15, y_tick_end = 1.25,
+  y_text_pos = 1.3, y_text_size = 3.5,
+  y_text_cutoff = 0.8,
+  max_scale_shift = 0.2
+)
+
+ggsave(filename = "../figures/FigureS2B-RadialBarPlot.pdf", p)
+
+rm(data_plot, viable_markers, p) # cleanup
+```
+
+### Figure S2C-RadialBarPlot
+
+```{r}
+data_plot <- data_serum
+
+viable_markers <- data_plot %>%
+  dplyr::select(PatientID, Assay, NPX, LOD) %>%
+  dplyr::mutate(belowLOD = if_else(NPX < LOD, 1, 0, NA_real_)) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    belowLOD_count = sum(belowLOD),
+    total_count = n()
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(belowLOD_freq = 100 * belowLOD_count / total_count) %>%
+  dplyr::filter(belowLOD_freq <= 30) %>%
+  .$Assay
+
+data_plot <- data_plot %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS",
+                             "Neuropathy-no-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = if_else(Group %in% c("COVID-GBS", "Control-GBS"),
+                                "GBS", "Neuropathy-no-GBS", NA_character_)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Neuropathy-no-GBS", "GBS"))) %>%
+  dplyr::left_join(marker_class, by = "Assay") %>%
+  dplyr::arrange(General.Classification, Assay, Group) %>%
+  dplyr::filter(Assay %in% viable_markers) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    pval = custom_stats_unpaired(scaled_NPX, Group, "Neuropathy-no-GBS", "GBS"),
+    effsize = custom_effsize(scaled_NPX, Group, "Neuropathy-no-GBS", "GBS"),
+    sign = custom_sign(scaled_NPX, Group, "Neuropathy-no-GBS", "GBS")
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::left_join(marker_class, by = "Assay") %>%
+  dplyr::group_by(General.Classification) %>%
+  dplyr::mutate(pval_corrected = p.adjust(pval, method = "BH")) %>%
+  dplyr::ungroup() %>%
+  dplyr::relocate(pval_corrected, .after = pval) %>%
+  dplyr::arrange(desc(effsize)) %>%
+  dplyr::mutate(Assay = factor(Assay, levels = .data$Assay)) %>%
+  dplyr::mutate(Assay_effsize = if_else(effsize >= 0.8, Assay,
+                                        NA_character_, NA_character_)) %>%
+  dplyr::mutate(Assay_Class_effsize = if_else(effsize >= 0.8,
+                                              General.Classification,
+                                              NA_character_, NA_character_)) %>%
+  dplyr::mutate(Assay_Class_effsize = factor(
+    Assay_Class_effsize, levels = levels(marker_class$General.Classification))
+  )
+
+p <- custom_radial_bar_plot(
+  data_plot,
+  group_major_name = "General.Classification",
+  group_minor_name = "Assay",
+  y_axis_name = "effsize",
+  fill_name = "sign",
+  cp = c("#285cff", "#f64d4d", cp_marker),
+  group_major_order = c("Signaling Molecules", "Cytokines", "Chemokines", "Growth Factors and Others"),
+  group_minor_order = data_plot %>% dplyr::arrange(General.Classification, desc(effsize)) %>% .$Assay,
+  fill_order = c(-1, 1),
+  external_circle = 0.8,
+  y_min_circle = -0.5,
+  y_rect_start = 0, y_rect_end = -0.1,
+  y_tick_start = 1.15, y_tick_end = 1.25,
+  y_text_pos = 1.3, y_text_size = 3.5,
+  y_text_cutoff = 0.8,
+  max_scale_shift = 0.2
+)
+
+ggsave(filename = "../figures/FigureS2C-RadialBarPlot.pdf", p)
+
+rm(data_plot, viable_markers, p) # cleanup
+```
+
+### Figure S2B-Boxplots
+
+```{r}
+### REFORMAT DATA
+data_boxplot <- data_csf %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS",
+                             "Neuropathy-no-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_csf & Run == 2)) %>%
+  dplyr::mutate(Group = if_else(Group %in% c("COVID-GBS", "Control-GBS"),
+                                "GBS", "Neuropathy-no-GBS", NA_character_)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Neuropathy-no-GBS", "GBS"))) %>%
+  dplyr::select(PatientID, Group, Assay, scaled_NPX) %>%
+  dplyr::left_join(marker_class, by = "Assay") %>%
+  dplyr::arrange(General.Classification, Assay, Group) %>%
+  dplyr::mutate(General.Classification = factor(General.Classification,
+                                                levels = c("Signaling Molecules",
+                                                           "Cytokines",
+                                                           "Chemokines",
+                                                           "Growth Factors and Others")))
+
+data_boxplot_stat <- data_boxplot %>%
+  dplyr::group_by(Assay, General.Classification) %>%
+  dplyr::summarise(
+    pval = custom_stats_unpaired(scaled_NPX, Group, "Neuropathy-no-GBS", "GBS")
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(General.Classification, Assay) %>%
+  dplyr::group_by(General.Classification) %>%
+  dplyr::mutate(pval_corrected = p.adjust(pval, method = "BH")) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(Assay %in% c("IL-20RA", "IL8", "LIF", "MCP-1", "CXCL9", "ST1A1", "Flt3L", "GDNF", "CSF-1"))
+
+data_plot <- data_boxplot %>%
+  dplyr::filter(Assay %in% data_boxplot_stat$Assay)
+
+data_plot_stat <- data_boxplot_stat %>%
+  dplyr::mutate(pval_corrected = signif(pval_corrected, 2)) %>%
+  dplyr::mutate(xmin = "Neuropathy-no-GBS") %>%
+  dplyr::mutate(xmax = "GBS") %>%
+  dplyr::left_join(
+    data_plot %>%
+      dplyr::group_by(Assay) %>%
+      dplyr::summarise(
+        y_max = max(scaled_NPX, na.rm = TRUE),
+        y_min = min(scaled_NPX, na.rm = TRUE)
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(y_max = max(y_max)) %>%
+      dplyr::mutate(y_min = min(y_min)) %>%
+      dplyr::mutate(y_pos = y_min + 1.05*(y_max-y_min)),
+    by = "Assay"
+  )
+
+# Create individual lists with the required number of repetitions
+rect_list_1 <- rep(list(element_rect(fill = "#5D9A3C")), 1) ### Signaling Molecules
+rect_list_2 <- rep(list(element_rect(fill = "#2AC6C3")), 1) ### Cytokines
+rect_list_3 <- rep(list(element_rect(fill = "#CB6CB3")), 1) ### Chemokines
+rect_list_4 <- rep(list(element_rect(fill = "#E29140")), 1) ### Growth Factors and Others
+rect_list_5 <- rep(list(element_rect(fill = "white")), 1000) ### Assays
+
+background_fill <- c(rect_list_1, rect_list_2, rect_list_3, rect_list_4, rect_list_5)
+
+p <- ggplot(data_plot) +
+  facet_wrap2(General.Classification~Assay, nrow = 1,
+              strip = strip_nested(bleed = FALSE, background_x = background_fill)) +
+  add_pvalue(data_plot_stat,
+             xmin = "xmin",
+             xmax = "xmax",
+             label = "pval_corrected",
+             y.position = "y_pos",
+             tip.length = 0,
+             step.group.by = "Assay",
+             bracket.size = 0.5) +
+  geom_boxplot(aes(x = Group, y = scaled_NPX, fill = Group), outlier.alpha = 0) +
+  geom_jitter(aes(x = Group, y = scaled_NPX), width = 0.25, height = 0, size = 1) +
+  scale_y_continuous(expand = expansion(mult = 0.08)) +
+  scale_fill_manual(values = cp_group[1:2]) +
+  ylab(label = "normalized protein abundance") +
+  guides(fill=guide_legend(title = "Patient Group")) +
+  theme_bw() +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+width_in_cm <- 2 ### EDIT
+height_in_cm <- 7 ### EDIT
+
+p_fixed <- set_panel_size(p, width  = unit(width_in_cm, "cm"),
+                          height = unit(height_in_cm, "cm"))
+
+ggsave(p_fixed, filename = "../figures/FigureS2B-Boxplots.pdf", width = 15, height = 5)
+
+rm(data_boxplot, data_boxplot_stat, data_plot, background_fill,
+   p, p_fixed, width_in_cm, height_in_cm, data_plot_stat) # cleanup
+rm(list = ls(pattern = "rect_list_")) # cleanup
+```
+
+### Figure S2C-Boxplots
+
+```{r}
+### REFORMAT DATA
+data_boxplot <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS",
+                             "Neuropathy-no-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = if_else(Group %in% c("COVID-GBS", "Control-GBS"),
+                                "GBS", "Neuropathy-no-GBS", NA_character_)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Neuropathy-no-GBS", "GBS"))) %>%
+  dplyr::select(PatientID, Group, Assay, scaled_NPX) %>%
+  dplyr::left_join(marker_class, by = "Assay") %>%
+  dplyr::arrange(General.Classification, Assay, Group) %>%
+  dplyr::mutate(General.Classification = factor(General.Classification,
+                                                levels = c("Signaling Molecules",
+                                                           "Cytokines",
+                                                           "Chemokines",
+                                                           "Growth Factors and Others")))
+
+data_boxplot_stat <- data_boxplot %>%
+  dplyr::group_by(Assay, General.Classification) %>%
+  dplyr::summarise(
+    pval = custom_stats_unpaired(scaled_NPX, Group, "Neuropathy-no-GBS", "GBS")
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(General.Classification, Assay) %>%
+  dplyr::group_by(General.Classification) %>%
+  dplyr::mutate(pval_corrected = p.adjust(pval, method = "BH")) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(Assay %in% c("CD8A", "TRANCE", "TNFB", "IL10", "CASP-8", "CST5"))
+
+data_plot <- data_boxplot %>%
+  dplyr::filter(Assay %in% data_boxplot_stat$Assay)
+
+data_plot_stat <- data_boxplot_stat %>%
+  dplyr::mutate(pval_corrected = signif(pval_corrected, 2)) %>%
+  dplyr::mutate(xmin = "Neuropathy-no-GBS") %>%
+  dplyr::mutate(xmax = "GBS") %>%
+  dplyr::left_join(
+    data_plot %>%
+      dplyr::group_by(Assay) %>%
+      dplyr::summarise(
+        y_max = max(scaled_NPX, na.rm = TRUE),
+        y_min = min(scaled_NPX, na.rm = TRUE)
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(y_max = max(y_max)) %>%
+      dplyr::mutate(y_min = min(y_min)) %>%
+      dplyr::mutate(y_pos = y_min + 1.05*(y_max-y_min)),
+    by = "Assay"
+  )
+
+# Create individual lists with the required number of repetitions
+rect_list_1 <- rep(list(element_rect(fill = "#5D9A3C")), 1) ### Signaling Molecules
+rect_list_2 <- rep(list(element_rect(fill = "#2AC6C3")), 1) ### Cytokines
+rect_list_3 <- rep(list(element_rect(fill = "#CB6CB3")), 0) ### Chemokines
+rect_list_4 <- rep(list(element_rect(fill = "#E29140")), 1) ### Growth Factors and Others
+rect_list_5 <- rep(list(element_rect(fill = "white")), 1000) ### Assays
+
+background_fill <- c(rect_list_1, rect_list_2, rect_list_3, rect_list_4, rect_list_5)
+
+p <- ggplot(data_plot) +
+  facet_wrap2(General.Classification~Assay, nrow = 1,
+              strip = strip_nested(bleed = FALSE, background_x = background_fill)) +
+  add_pvalue(data_plot_stat,
+             xmin = "xmin",
+             xmax = "xmax",
+             label = "pval_corrected",
+             y.position = "y_pos",
+             tip.length = 0,
+             step.group.by = "Assay",
+             bracket.size = 0.5) +
+  geom_boxplot(aes(x = Group, y = scaled_NPX, fill = Group), outlier.alpha = 0) +
+  geom_jitter(aes(x = Group, y = scaled_NPX), width = 0.25, height = 0, size = 1) +
+  scale_y_continuous(expand = expansion(mult = 0.08)) +
+  scale_fill_manual(values = cp_group[1:2]) +
+  ylab(label = "normalized protein abundance") +
+  guides(fill=guide_legend(title = "Patient Group")) +
+  theme_bw() +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+width_in_cm <- 2 ### EDIT
+height_in_cm <- 7 ### EDIT
+
+p_fixed <- set_panel_size(p, width  = unit(width_in_cm, "cm"),
+                          height = unit(height_in_cm, "cm"))
+
+ggsave(p_fixed, filename = "../figures/FigureS2C-Boxplots.pdf", width = 15, height = 5)
+
+rm(data_boxplot, data_boxplot_stat, data_plot, background_fill,
+   p, p_fixed, width_in_cm, height_in_cm, data_plot_stat) # cleanup
+rm(list = ls(pattern = "rect_list_")) # cleanup
+```
+
+### Figure S2D
+
+```{r}
+### REFORMAT DATA
+data_boxplot <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS",
+                             "Neuropathy-no-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = if_else(Group %in% c("COVID-GBS", "Control-GBS"),
+                                "GBS", "Neuropathy-no-GBS", NA_character_)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Neuropathy-no-GBS", "GBS"))) %>%
+  dplyr::select(PatientID, Group, Assay, scaled_NPX) %>%
+  dplyr::left_join(marker_class, by = "Assay") %>%
+  dplyr::arrange(General.Classification, Assay, Group) %>%
+  dplyr::mutate(General.Classification = factor(General.Classification,
+                                                levels = c("Signaling Molecules",
+                                                           "Cytokines",
+                                                           "Chemokines",
+                                                           "Growth Factors and Others"))) %>%
+  dplyr::mutate(sample_type = "Serum")
+
+data_boxplot_stat <- data_boxplot %>%
+  dplyr::group_by(Assay, General.Classification) %>%
+  dplyr::summarise(
+    pval = custom_stats_unpaired(scaled_NPX, Group, "Neuropathy-no-GBS", "GBS")
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(General.Classification, Assay) %>%
+  dplyr::group_by(General.Classification) %>%
+  dplyr::mutate(pval_corrected = p.adjust(pval, method = "BH")) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(Assay %in% c("IL33", "TWEAK", "DNER", "IL-10RB", "IL8", "LIF"))
+
+data_plot <- data_boxplot %>%
+  dplyr::filter(Assay %in% data_boxplot_stat$Assay)
+
+data_plot_stat <- data_boxplot_stat %>%
+  dplyr::mutate(pval_corrected = signif(pval_corrected, 2)) %>%
+  dplyr::mutate(xmin = "Neuropathy-no-GBS") %>%
+  dplyr::mutate(xmax = "GBS") %>%
+  dplyr::left_join(
+    data_plot %>%
+      dplyr::group_by(Assay) %>%
+      dplyr::summarise(
+        y_max = max(scaled_NPX, na.rm = TRUE),
+        y_min = min(scaled_NPX, na.rm = TRUE)
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(y_max = max(y_max)) %>%
+      dplyr::mutate(y_min = min(y_min)) %>%
+      dplyr::mutate(y_pos = y_min + 1.05*(y_max-y_min)),
+    by = "Assay"
+  )
+
+# Create individual lists with the required number of repetitions
+rect_list_1 <- rep(list(element_rect(fill = "#5D9A3C")), 1) ### Signaling Molecules
+rect_list_2 <- rep(list(element_rect(fill = "#2AC6C3")), 1) ### Cytokines
+rect_list_3 <- rep(list(element_rect(fill = "#CB6CB3")), 0) ### Chemokines
+rect_list_4 <- rep(list(element_rect(fill = "#E29140")), 0) ### Growth Factors and Others
+rect_list_5 <- rep(list(element_rect(fill = "white")), 1000) ### Assays
+
+background_fill <- c(rect_list_1, rect_list_2, rect_list_3, rect_list_4, rect_list_5)
+
+p <- ggplot(data_plot) +
+  facet_wrap2(General.Classification~ Assay, nrow = 1,
+              strip = strip_nested(bleed = FALSE, background_x = background_fill)) +
+  add_pvalue(data_plot_stat,
+             xmin = "xmin",
+             xmax = "xmax",
+             label = "pval_corrected",
+             y.position = "y_pos",
+             tip.length = 0,
+             step.group.by = "Assay",
+             bracket.size = 0.5) +
+  geom_boxplot(aes(x = Group, y = scaled_NPX, fill = Group), outlier.alpha = 0) +
+  geom_jitter(aes(x = Group, y = scaled_NPX), width = 0.25, height = 0, size = 1) +
+  scale_y_continuous(expand = expansion(mult = 0.08)) +
+  scale_fill_manual(values = cp_group[1:2]) +
+  ylab(label = "normalized protein abundance") +
+  guides(fill=guide_legend(title = "Patient Group")) +
+  theme_bw() +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+width_in_cm <- 2 ### EDIT
+height_in_cm <- 7 ### EDIT
+
+p_fixed <- set_panel_size(p, width  = unit(width_in_cm, "cm"),
+                          height = unit(height_in_cm, "cm"))
+
+ggsave(p_fixed, filename = "../figures/FigureS2D.pdf", width = 8, height = 5)
+
+rm(data_boxplot, data_boxplot_stat, data_plot, background_fill,
+   p, p_fixed, width_in_cm, height_in_cm, data_plot_stat) # cleanup
+rm(list = ls(pattern = "rect_list_")) # cleanup
+```
+
+### Figure S2E
+
+```{r}
+### REFORMAT DATA
+data_boxplot <- data_csf %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS",
+                             "Neuropathy-no-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_csf & Run == 2)) %>%
+  dplyr::mutate(Group = if_else(Group %in% c("COVID-GBS", "Control-GBS"),
+                                "GBS", "Neuropathy-no-GBS", NA_character_)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Neuropathy-no-GBS", "GBS"))) %>%
+  dplyr::select(PatientID, Group, Assay, scaled_NPX) %>%
+  dplyr::left_join(marker_class, by = "Assay") %>%
+  dplyr::arrange(General.Classification, Assay, Group) %>%
+  dplyr::mutate(General.Classification = factor(General.Classification,
+                                                levels = c("Signaling Molecules",
+                                                           "Cytokines",
+                                                           "Chemokines",
+                                                           "Growth Factors and Others"))) %>%
+  dplyr::mutate(sample_type = "CSF")
+
+data_boxplot_stat <- data_boxplot %>%
+  dplyr::group_by(Assay, General.Classification) %>%
+  dplyr::summarise(
+    pval = custom_stats_unpaired(scaled_NPX, Group, "Neuropathy-no-GBS", "GBS")
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(General.Classification, Assay) %>%
+  dplyr::group_by(General.Classification) %>%
+  dplyr::mutate(pval_corrected = p.adjust(pval, method = "BH")) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(Assay %in% c("CD8A", "CD5", "CD244", "IL-10RB"))
+
+data_plot <- data_boxplot %>%
+  dplyr::filter(Assay %in% data_boxplot_stat$Assay)
+
+data_plot_stat <- data_boxplot_stat %>%
+  dplyr::mutate(pval_corrected = signif(pval_corrected, 2)) %>%
+  dplyr::mutate(xmin = "Neuropathy-no-GBS") %>%
+  dplyr::mutate(xmax = "GBS") %>%
+  dplyr::left_join(
+    data_plot %>%
+      dplyr::group_by(Assay) %>%
+      dplyr::summarise(
+        y_max = max(scaled_NPX, na.rm = TRUE),
+        y_min = min(scaled_NPX, na.rm = TRUE)
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(y_max = max(y_max)) %>%
+      dplyr::mutate(y_min = min(y_min)) %>%
+      dplyr::mutate(y_pos = y_min + 1.05*(y_max-y_min)),
+    by = "Assay"
+  )
+
+# Create individual lists with the required number of repetitions
+rect_list_1 <- rep(list(element_rect(fill = "#5D9A3C")), 1) ### Signaling Molecules
+rect_list_2 <- rep(list(element_rect(fill = "#2AC6C3")), 0) ### Cytokines
+rect_list_3 <- rep(list(element_rect(fill = "#CB6CB3")), 0) ### Chemokines
+rect_list_4 <- rep(list(element_rect(fill = "#E29140")), 0) ### Growth Factors and Others
+rect_list_5 <- rep(list(element_rect(fill = "white")), 1000) ### Assays
+
+background_fill <- c(rect_list_1, rect_list_2, rect_list_3, rect_list_4, rect_list_5)
+
+p <- ggplot(data_plot) +
+  facet_wrap2(General.Classification~Assay, nrow = 1,
+              strip = strip_nested(bleed = FALSE, background_x = background_fill)) +
+  add_pvalue(data_plot_stat,
+             xmin = "xmin",
+             xmax = "xmax",
+             label = "pval_corrected",
+             y.position = "y_pos",
+             tip.length = 0,
+             step.group.by = "Assay",
+             bracket.size = 0.5) +
+  geom_boxplot(aes(x = Group, y = scaled_NPX, fill = Group), outlier.alpha = 0) +
+  geom_jitter(aes(x = Group, y = scaled_NPX, fill = Group), width = 0.25, height = 0, size = 1) +
+  scale_y_continuous(expand = expansion(mult = 0.08)) +
+  scale_fill_manual(values = cp_group[1:2]) +
+  ylab(label = "normalized protein abundance") +
+  guides(fill=guide_legend(title = "Patient Group")) +
+  theme_bw() +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+width_in_cm <- 2 ### EDIT
+height_in_cm <- 7 ### EDIT
+
+p_fixed <- set_panel_size(p, width  = unit(width_in_cm, "cm"),
+                          height = unit(height_in_cm, "cm"))
+
+ggsave(p_fixed, filename = "../figures/FigureS2E.pdf", width = 7, height = 5)
+
+rm(data_boxplot, data_boxplot_stat, data_plot, background_fill,
+   p, p_fixed, width_in_cm, height_in_cm, data_plot_stat) # cleanup
+rm(list = ls(pattern = "rect_list_")) # cleanup
+```

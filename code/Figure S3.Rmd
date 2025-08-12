@@ -1,0 +1,197 @@
+---
+title: "Figure S3"
+author: "Can Ulutekin"
+date: "2025-08-12"
+---
+
+### Cleanup
+
+```{r}
+rm(list = ls())
+```
+
+### Packages
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(openxlsx)
+library(viridis)
+library(ggrepel)
+```
+
+### Load Data
+
+pns_atlas_sub.rds is the full sural_seurat/pns_atlas.qs2 object from Heming et al but was subset to include only the conditions: VN, CIDP, OIN, CIAP, DPN, ONIN. VN, CIDP and OIN where classified as Inflammed and CIAP, DPN and ONIN where classified as Uninflammed.
+
+Cluster Abbreviations.xlsx is just an excel sheet that holds the general names of very specific clusters and where used to group clusters from the same cell type together.
+
+```{r}
+seu_obj_sub <- readRDS(file = "../data/Heming et al/pns_atlas_sub.rds")
+clust_abbv <- read.xlsx(xlsxFile = "../data/Heming et al/Cluster Abbreviations.xlsx")
+```
+
+### Merge Clusters With Same Cell Types
+
+```{r}
+meta_data <- seu_obj_sub@meta.data
+clust_order <- seu_obj_sub@misc$cluster_order
+clust_col <- seu_obj_sub@misc$cluster_col
+active_ident <- seu_obj_sub@active.ident
+
+clust_order <- unique(str_remove(clust_order, "[0-9]"))
+
+clust_col_to_remove <- c("periC2", "periC3", "PC2", "ven_capEC2", "Macro2")
+clust_col <- clust_col[!names(clust_col) %in% clust_col_to_remove]
+
+names(clust_col) <- str_remove(names(clust_col), "[0-9]")
+
+meta_data <- meta_data %>%
+  dplyr::mutate(cluster = str_remove(cluster, "[0-9]")) %>%
+  dplyr::mutate(cluster = factor(cluster, levels = clust_order))
+
+for (i in 1:length(clust_order)) {
+  clust_order[i] <- clust_abbv %>%
+    dplyr::filter(Abreviation == clust_order[i]) %>%
+    .$General.Name
+}
+clust_order <- unique(clust_order)
+
+clust_col_to_remove <- c("mySC", "repairSC", "damageSC", "endoC", "epiC", "venEC", "artEC", "LEC")
+clust_col <- clust_col[!names(clust_col) %in% clust_col_to_remove]
+
+names(clust_col) <- clust_order
+
+rownames_temp <- rownames(meta_data)
+
+meta_data <- meta_data %>%
+  dplyr::left_join(clust_abbv %>%
+                     dplyr::rename(cluster = Abreviation) %>%
+                     dplyr::select(cluster, General.Name),
+                   by = "cluster") %>%
+  dplyr::select(-cluster) %>%
+  dplyr::rename(cluster = General.Name) %>%
+  dplyr::relocate(cluster, .before = "level2") %>%
+  dplyr::mutate(cluster = factor(cluster, levels = clust_order))
+
+rownames(meta_data) <- rownames_temp
+
+seu_obj_sub@meta.data <- meta_data
+seu_obj_sub@misc$cluster_order <- clust_order
+seu_obj_sub@misc$cluster_col <- clust_col
+
+Idents(seu_obj_sub) <- seu_obj_sub@meta.data$cluster
+
+rm(meta_data, clust_order, clust_col, clust_col_to_remove, rownames_temp, i) # cleanup
+```
+
+### Figure S3A
+
+```{r}
+cluster.ids <- levels(Idents(seu_obj_sub))
+
+cluster_markers <- lapply(cluster.ids, function(x) {
+  FindMarkers(
+    object = seu_obj_sub,
+    ident.1 = "Inflammed_subtypes",
+    ident.2 = "Uninflammed_subtypes",
+    group.by = "grouping",
+    subset.ident = x,
+    test.use = "wilcox",
+    min.pct = 0.10,
+    logfc.threshold = 0.25
+  ) %>%
+  tibble::rownames_to_column("gene") %>%
+  dplyr::mutate(cluster = x)
+})
+
+for (i in 1:length(cluster_markers)) {
+  if(i == 1){
+    data_pval <- cluster_markers[[i]] %>%
+      dplyr::filter(gene %in% c("CXCL8", "CXCR1", "CXCR2", "LIF", "LIFR", "IL6ST"))
+  } else {
+    data_pval_temp <- cluster_markers[[i]] %>%
+      dplyr::filter(gene %in% c("CXCL8", "CXCR1", "CXCR2", "LIF", "LIFR", "IL6ST"))
+    
+    data_pval <- data_pval %>%
+      dplyr::bind_rows(data_pval_temp)
+  }
+}
+
+data_pval <- data_pval %>%
+  dplyr::mutate(gene_text = if_else(p_val_adj <= 0.05, gene, NA_character_, NA_character_)) %>%
+  dplyr::mutate(cluster_text = if_else(p_val_adj <= 0.05, cluster, NA_character_, NA_character_))
+
+p <- ggplot(data_pval,
+       aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed") +
+  geom_point(aes(fill = cluster_text), shape = 21, col = "black") +
+  geom_label_repel(aes(fill = cluster_text, label = gene_text)) +
+  scale_color_manual(values = seu_obj_sub@misc[["cluster_col"]]) +
+  scale_fill_manual(values = seu_obj_sub@misc[["cluster_col"]]) +
+  theme_bw()
+
+pdf(file = "../figures/FigureS3A.pdf", height = 5)
+print(p)
+invisible(dev.off())
+
+rm(cluster.ids, i, data_pval_temp, p) # cleanup
+```
+
+### Figure S3B
+
+```{r}
+p_comb <- Seurat::DotPlot(seu_obj_sub,
+                          features = c("LIF", "LIFR", "IL6ST")) +
+  viridis::scale_color_viridis(option = "viridis") +
+  coord_flip() +
+  ggtitle(label = "Combined") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_blank()
+  )
+
+p_uninflammed <- Seurat::DotPlot(subset(seu_obj_sub, subset = grouping == "Uninflammed_subtypes"),
+                                 features = c("LIF", "LIFR", "IL6ST")) +
+  scale_color_viridis(
+    option = "viridis",
+    limits = c(-1.5, 2.5),
+    oob = scales::squish
+  ) +
+  scale_size_area(
+    limits = range(p_comb$data$pct.exp, na.rm = TRUE),
+    oob = scales::squish
+  ) +
+  coord_flip() +
+  ggtitle(label = "Uninflammed") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_blank()
+  )
+
+p_inflammed <- Seurat::DotPlot(subset(seu_obj_sub, subset = grouping == "Inflammed_subtypes"),
+                               features = c("LIF", "LIFR", "IL6ST")) +
+  scale_color_viridis(
+    option = "viridis",
+    limits = c(-1.5, 2.5),
+    oob = scales::squish
+  ) +
+  scale_size_area(
+    limits = range(p_comb$data$pct.exp, na.rm = TRUE),
+    oob = scales::squish
+  ) +
+  coord_flip() +
+  ggtitle(label = "Inflammed") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_blank()
+  )
+
+pdf(file = "../figures/FigureS3B.pdf", width = 9, height = 4)
+print(p_uninflammed)
+print(p_inflammed)
+invisible(dev.off())
+
+rm(p_comb, p_uninflammed, p_inflammed) # cleanup
+```

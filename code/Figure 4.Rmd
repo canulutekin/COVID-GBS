@@ -1,0 +1,331 @@
+---
+title: "Figure 4"
+author: "Can Ulutekin"
+date: "2025-05-08"
+---
+
+### Cleanup
+
+```{r}
+rm(list = ls())
+```
+
+### Packages
+
+```{r}
+library(tidyverse)
+library(openxlsx)
+library(viridis)
+library(ggrepel)
+library(ggh4x)
+library(egg)
+library(kSamples)
+```
+
+### Custom Functions
+
+```{r}
+custom_ad <- function(values, groups, group1, group2){
+  x <- values[groups == group1]
+  y <- values[groups == group2]
+
+  ad_output <- kSamples::ad.test(x, y)
+
+  return(as.vector(ad_output$ad[,"T.AD"])[2])
+}
+```
+
+### Color Palettes
+
+```{r}
+cp_group <- c("#449489", "#457cd6", "#945F9C", "#e34262")
+cp_marker <- c("#5D9A3C", "#2AC6C3", "#CB6CB3", "#E29140")
+```
+
+### Load Data
+
+```{r}
+data_csf <- read.xlsx(xlsxFile = "../data/data_csf.xlsx")
+data_serum <- read.xlsx(xlsxFile = "../data/data_serum.xlsx")
+marker_class <- read.xlsx(xlsxFile = "../data/marker_class.xlsx")
+md <- read.xlsx(xlsxFile = "../data/meta_data.xlsx")
+
+all_markers <- sort.default(unique(data_csf$Assay))
+```
+
+### Reformat Meta Data
+
+```{r}
+marker_class <- marker_class %>%
+  dplyr::mutate(General.Classification = factor(
+    General.Classification,
+    levels = c("Signaling Molecules", "Cytokines",
+               "Chemokines", "Growth Factors and Others")))
+
+md <- md %>%
+  dplyr::mutate(Group = factor(
+    Group, levels = c("Neuropathy-no-GBS", "Control-GBS",
+                      "COVID-GBS", "COVID-no-GBS")))
+```
+
+### Reformat Data
+
+```{r}
+data_csf <- data_csf %>%
+  dplyr::filter(QC_Warning == "Pass") %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::mutate(scaled_NPX = scale(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::relocate(scaled_NPX, .after = "NPX") %>%
+  
+  ### Two Patient_03 Samples in CSF Data in one run (lets average it out)
+  dplyr::group_by(PatientID, Assay, Run) %>%
+  dplyr::mutate(scaled_NPX = mean(scaled_NPX)) %>%
+  dplyr::mutate(NPX = mean(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::distinct()
+
+data_serum <- data_serum %>%
+  dplyr::filter(QC_Warning == "Pass") %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::mutate(scaled_NPX = scale(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::relocate(scaled_NPX, .after = "NPX")
+
+dual_run_patients_csf <- data_csf %>%
+  dplyr::select(PatientID, Run) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(PatientID) %>%
+  dplyr::group_by(PatientID) %>%
+  dplyr::add_tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(n > 1) %>%
+  dplyr::select(PatientID) %>%
+  dplyr::distinct() %>%
+  .$PatientID
+
+dual_run_patients_serum <- data_serum %>%
+  dplyr::select(PatientID, Run) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(PatientID) %>%
+  dplyr::group_by(PatientID) %>%
+  dplyr::add_tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(n > 1) %>%
+  dplyr::select(PatientID) %>%
+  dplyr::distinct() %>%
+  .$PatientID
+```
+
+### Figure 4A
+
+```{r}
+### REFORMAT DATA
+data_scatter <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS",
+                             "COVID-no-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Control-GBS", "COVID-GBS", "COVID-no-GBS")))
+
+### Select Markers with Below LOD Frequencies Below 30%
+viable_markers <- data_scatter %>%
+  dplyr::select(PatientID, Assay, NPX, LOD) %>%
+  dplyr::mutate(belowLOD = if_else(NPX < LOD, 1, 0, NA_real_)) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    belowLOD_count = sum(belowLOD),
+    total_count = n()
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(belowLOD_freq = 100 * belowLOD_count / total_count) %>%
+  dplyr::filter(belowLOD_freq <= 30) %>%
+  .$Assay
+
+data_scatter <- data_scatter %>%
+  dplyr::filter(Assay %in% viable_markers)
+
+### AD Calculation
+data_scatter_GBS <- data_scatter %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS")) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    ad_GBS = custom_ad(scaled_NPX, Group, "COVID-GBS", "Control-GBS"),
+  ) %>%
+  dplyr::ungroup()
+
+data_scatter_COVID <- data_scatter %>%
+  dplyr::filter(Group %in% c("COVID-no-GBS", "COVID-GBS")) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    ad_COVID = custom_ad(scaled_NPX, Group, "COVID-GBS", "COVID-no-GBS"),
+  ) %>%
+  dplyr::ungroup()
+
+data_scatter <- data_scatter_GBS %>%
+  dplyr::full_join(data_scatter_COVID, by = "Assay") %>%
+  dplyr::left_join(marker_class, by = "Assay") %>%
+  dplyr::arrange(General.Classification, Assay) %>%
+  dplyr::mutate(signature = case_when(
+    ad_COVID > 1 & ad_GBS < -0.5 ~ "GBS signature",
+    ad_COVID < -0.5 & ad_GBS > 1 ~ "COVID signature",
+    ad_COVID > 1 & ad_GBS > 1 ~ "Unique signature",
+    .default = "Unclear"
+  )) %>%
+  dplyr::mutate(signature = factor(signature,
+                                   levels = c("Common signature",
+                                              "GBS signature",
+                                              "COVID signature",
+                                              "Unique signature",
+                                              "Unclear"))) %>%
+  dplyr::mutate(label = if_else(signature != "Unclear", Assay,
+                                NA_character_, NA_character_))
+
+### PLOT
+
+pdf(file = "../figures/Figure4A.pdf", width = 5, height = 10)
+p <- ggplot(data_scatter %>%
+              dplyr::arrange(desc(signature)),
+            aes(x = ad_GBS, y = ad_COVID,
+                fill = signature, color = signature)) +
+  
+  geom_segment(x = -2, xend = -0.5, y = 1, yend = 1, color = "black", linetype = "dashed") +
+  geom_segment(y = -2, yend = -0.5, x = 1, xend = 1, color = "black", linetype = "dashed") +
+  
+  geom_segment(x = 10, xend = 1, y = -0.5, yend = -0.5, color = "black", linetype = "dashed") +
+  geom_segment(x = 10, xend = 1, y = 1, yend = 1, color = "black", linetype = "dashed") +
+  geom_segment(y = 10, yend = 1, x = -0.5, xend = -0.5, color = "black", linetype = "dashed") +
+  geom_segment(y = 10, yend = 1, x = 1, xend = 1, color = "black", linetype = "dashed") +
+  
+  geom_point() +
+  geom_text_repel(aes(label = label), size = 3.5, na.rm = TRUE, max.overlaps = 15) +
+  
+  scale_y_continuous(breaks = c(-1:9)) +
+  ylab(label = "AD Statistic (COVID)") +
+  xlab(label = "AD Statistic (GBS)") +
+  coord_fixed() +
+  scale_x_continuous(limits = c(-1.3, 4.8), breaks = -1:5) +
+  scale_color_manual(values = c("#457cd6", "#e34262", "#945F9C", "gray")) +
+  
+  theme_bw() +
+  theme(panel.grid.minor = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        legend.position = "none")
+
+print(p)
+invisible(dev.off())
+
+rm(data_scatter, data_scatter_COVID, data_scatter_GBS, p) # cleanup
+```
+
+### Figure 4B
+
+```{r}
+### REFORMAT DATA
+data_scatter <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS",
+                             "COVID-no-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Control-GBS", "COVID-GBS", "COVID-no-GBS")))
+
+### Select Markers with Below LOD Frequencies Below 30%
+viable_markers <- data_scatter %>%
+  dplyr::select(PatientID, Assay, NPX, LOD) %>%
+  dplyr::mutate(belowLOD = if_else(NPX < LOD, 1, 0, NA_real_)) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    belowLOD_count = sum(belowLOD),
+    total_count = n()
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(belowLOD_freq = 100 * belowLOD_count / total_count) %>%
+  dplyr::filter(belowLOD_freq <= 30) %>%
+  .$Assay
+
+data_scatter <- data_scatter %>%
+  dplyr::filter(Assay %in% viable_markers)
+
+### AD Calculation
+data_AD_GBS <- data_scatter %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS")) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    ad_GBS = custom_ad(scaled_NPX, Group, "COVID-GBS", "Control-GBS")
+  ) %>%
+  dplyr::ungroup()
+
+data_AD_COVID <- data_scatter %>%
+  dplyr::filter(Group %in% c("COVID-no-GBS", "COVID-GBS")) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    ad_COVID = custom_ad(scaled_NPX, Group, "COVID-GBS", "COVID-no-GBS")
+  ) %>%
+  dplyr::ungroup()
+
+data_AD <- data_AD_GBS %>%
+  dplyr::full_join(data_AD_COVID, by = "Assay") %>%
+  dplyr::left_join(marker_class, by = "Assay") %>%
+  dplyr::arrange(General.Classification, Assay) %>%
+  dplyr::mutate(signature = case_when(
+    ad_COVID > 1 & ad_GBS < -0.5 ~ "GBS signature",
+    ad_COVID < -0.5 & ad_GBS > 1 ~ "COVID signature",
+    ad_COVID > 1 & ad_GBS > 1 ~ "Unique signature",
+    .default = "Unclear"
+  )) %>%
+  dplyr::mutate(signature = factor(signature,
+                                   levels = c("Common signature",
+                                              "GBS signature",
+                                              "COVID signature",
+                                              "Unique signature",
+                                              "Unclear"))) %>%
+  dplyr::mutate(label = if_else(signature != "Unclear", Assay,
+                                NA_character_, NA_character_))
+
+data_plot <- data_scatter %>%
+  dplyr::left_join(data_AD, by = "Assay") %>%
+  dplyr::filter(!is.na(label)) %>%
+  dplyr::select(PatientID, Group, Assay, scaled_NPX,
+                signature, General.Classification)
+
+### PLOT
+
+# Create individual lists with the required number of repetitions
+rect_list_1 <- rep(list(element_rect(fill = "#457cd6")), 2)
+rect_list_2 <- rep(list(element_rect(fill = "#e34262")), 2)
+rect_list_3 <- rep(list(element_rect(fill = "#945F9C")), 2)
+rect_list_4 <- rep(list(element_rect(fill = "white")), 1000) ### For the markers
+
+# Combine the lists into a single list
+background_fill <- c(rect_list_1, rect_list_2, rect_list_3, rect_list_4)
+
+p <- ggplot(data_plot) +
+  facet_wrap2(
+    signature~Assay, ncol = 7, scales = "free_y",
+    strip = strip_nested(bleed = FALSE, background_x = background_fill),
+  ) +
+  geom_boxplot(aes(x = Group, y = scaled_NPX, fill = Group), outlier.alpha = 0) +
+  geom_jitter(aes(x = Group, y = scaled_NPX), size = 0.5, height = 0, width = 0.2) +
+  scale_fill_manual(values = cp_group[2:4]) +
+  ylab(label = "normalized protein abundance") +
+  guides(fill=guide_legend(title = "Patient Group")) +
+  theme_bw() +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+width_in_cm <- 2.5 ### EDIT
+height_in_cm <- 5 ### EDIT
+
+p_fixed <- set_panel_size(p, width  = unit(width_in_cm, "cm"),
+                          height = unit(height_in_cm, "cm"))
+
+ggsave(p_fixed, filename = "../figures/Figure4B.pdf", width = 14, height = 11)
+
+rm(data_scatter, viable_markers, data_plot, p, width_in_cm, height_in_cm,
+   data_AD_GBS, data_AD_COVID, data_AD, background_fill, p_fixed) # cleanup
+rm(list = ls(pattern = "rect_list_")) # cleanup
+```

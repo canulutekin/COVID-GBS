@@ -1,0 +1,222 @@
+---
+title: "Figure S6"
+author: "Can Ulutekin"
+date: "2025-07-07"
+---
+
+### Cleanup
+
+```{r}
+rm(list = ls())
+```
+
+### Packages
+
+```{r}
+library(tidyverse)
+library(openxlsx)
+library(viridis)
+library(ggrepel)
+library(ggh4x)
+library(egg)
+```
+
+### Custom Functions
+
+```{r}
+lower_first <- function(x) {
+  # works on a character vector
+  x <- as.character(x)
+  nonempty <- nzchar(x)
+  # for each non‑empty element, lowercase its first char in place
+  substr(x[nonempty], 1, 1) <- tolower(substr(x[nonempty], 1, 1))
+  x
+}
+
+custom_corr_plot <- function(data_plot, data_plot_text, y_axis, marker){
+  x_pos <- 0
+  
+  if(y_axis == "Lowest_MRC_sum_score"){
+    y_pos_corr <- 115
+    y_pos_pval <- 100
+  }
+  
+  if(y_axis == "Peak_GBS_disability_score"){
+    y_pos_corr <- 7.2
+    y_pos_pval <- 6.5
+  }
+  
+  if(y_axis == "Recovery_GBS_disability_score"){
+    y_pos_corr <- 2.5
+    y_pos_pval <- 2
+  }
+  
+  p <- ggplot(data_plot, aes(x = scaled_NPX, y = .data[[y_axis]], color = Group, fill = Group)) +
+    facet_wrap(~Group) +
+    geom_smooth(formula = 'y ~ x', method = "lm") +
+    geom_point(color = "black") +
+    
+    geom_text(data = data_plot_text,
+              x = x_pos, y = y_pos_corr, color = "black", size = 3, hjust = 0,
+              aes(label = paste0("Spearman correlation: ",
+                                 signif(.data[[paste0("cor_", lower_first(y_axis))]], 2)))) +
+    geom_text(data = data_plot_text,
+              x = x_pos, y = y_pos_pval, color = "black", size = 3, hjust = 0,
+              aes(label = paste0("p-value: ",
+                                 signif(.data[[paste0("p_value_", lower_first(y_axis))]], 3)))) +
+    
+    xlab(label = paste("normalized", marker, "abundance")) +
+    ylab(str_replace_all(y_axis, "_", " ")) +
+    scale_color_manual(values = cp_group[2:3]) +
+    scale_fill_manual(values = cp_group[2:3]) +
+    theme_bw()
+  
+  return(p)
+}
+
+custom_corr_plots <- function(data, dual_run_patients, marker){
+  
+  data_plot <- data %>%
+    left_join(md, by = "PatientID") %>%
+    filter(Group %in% c("Control-GBS", "COVID-GBS")) %>%
+    filter(!(PatientID %in% dual_run_patients & Run == 2)) %>%
+    mutate(Group = factor(Group, levels = c("Control-GBS", "COVID-GBS"))) %>%
+    filter(Assay == marker) %>%
+    rename(Lowest_MRC_sum_score = `MRC.sum.score.(0-60).at.peak.(acute.phase/lowest.MRC.sum.score.documented)`,
+           Peak_GBS_disability_score = `GBS.disability.score:.0-2,.3-4.or.5.or.6.at.peak.(acute.phase)`,
+           Recovery_GBS_disability_score = `GBS.disability.score:.0-2,.3-4.or.5.or.6.follow-up.(recovery)`) %>%
+    select(PatientID, Assay, LOD, NPX, scaled_NPX, Group, Lowest_MRC_sum_score,
+           Peak_GBS_disability_score, Recovery_GBS_disability_score) %>%
+    filter(Assay == marker) %>%
+    
+    group_by(Group) %>%
+    # Compute the correlation test result for each group and store it as a list-column
+    mutate(cor_test = list(cor.test(scaled_NPX, Lowest_MRC_sum_score, 
+                                    method = "spearman", use = "complete.obs")),
+           # Extract the correlation coefficient
+           cor_lowest_MRC_sum_score = map_dbl(cor_test, ~ .x$estimate),
+           # Extract the p-value
+           p_value_lowest_MRC_sum_score = map_dbl(cor_test, ~ .x$p.value)) %>%
+    ungroup() %>%
+    # Optionally, remove the intermediate cor_test column
+    select(-cor_test) %>%
+    
+    group_by(Group) %>%
+    # Compute the correlation test result for each group and store it as a list-column
+    mutate(cor_test = list(cor.test(scaled_NPX, Peak_GBS_disability_score, 
+                                    method = "spearman", use = "complete.obs")),
+           # Extract the correlation coefficient
+           cor_peak_GBS_disability_score = map_dbl(cor_test, ~ .x$estimate),
+           # Extract the p-value
+           p_value_peak_GBS_disability_score = map_dbl(cor_test, ~ .x$p.value)) %>%
+    ungroup() %>%
+    # Optionally, remove the intermediate cor_test column
+    select(-cor_test) %>%
+    
+    group_by(Group) %>%
+    # Compute the correlation test result for each group and store it as a list-column
+    mutate(cor_test = list(cor.test(scaled_NPX, Recovery_GBS_disability_score, 
+                                    method = "spearman", use = "complete.obs")),
+           # Extract the correlation coefficient
+           cor_recovery_GBS_disability_score = map_dbl(cor_test, ~ .x$estimate),
+           # Extract the p-value
+           p_value_recovery_GBS_disability_score = map_dbl(cor_test, ~ .x$p.value)) %>%
+    ungroup() %>%
+    # Optionally, remove the intermediate cor_test column
+    select(-cor_test)
+  
+  data_plot_text <- data_plot %>%
+    dplyr::select(Group,
+                  cor_lowest_MRC_sum_score, p_value_lowest_MRC_sum_score,
+                  cor_peak_GBS_disability_score, p_value_peak_GBS_disability_score,
+                  cor_recovery_GBS_disability_score, p_value_recovery_GBS_disability_score) %>%
+    dplyr::distinct()
+  
+  p1 <- custom_corr_plot(data_plot, data_plot_text, "Lowest_MRC_sum_score", marker)
+  p2 <- custom_corr_plot(data_plot, data_plot_text, "Peak_GBS_disability_score", marker)
+  p3 <- custom_corr_plot(data_plot, data_plot_text, "Recovery_GBS_disability_score", marker)
+  
+  print(p1)
+  print(p2)
+  print(p3)
+}
+```
+
+### Color Palettes
+
+```{r}
+cp_group <- c("#449489", "#457cd6", "#945F9C", "#e34262")
+cp_marker <- c("#5D9A3C", "#2AC6C3", "#CB6CB3", "#E29140")
+```
+
+### Load Data
+
+```{r}
+data_csf <- read.xlsx(xlsxFile = "../data/data_csf.xlsx")
+data_serum <- read.xlsx(xlsxFile = "../data/data_serum.xlsx")
+marker_class <- read.xlsx(xlsxFile = "../data/marker_class.xlsx")
+md <- read.xlsx(xlsxFile = "../data/meta_data.xlsx")
+
+all_markers <- sort.default(unique(data_csf$Assay))
+```
+
+### Reformat Meta Data
+
+```{r}
+marker_class <- marker_class %>%
+  dplyr::mutate(General.Classification = factor(
+    General.Classification,
+    levels = c("Signaling Molecules", "Cytokines",
+               "Chemokines", "Growth Factors and Others")))
+
+md <- md %>%
+  dplyr::mutate(Group = factor(
+    Group, levels = c("Neuropathy-no-GBS", "Control-GBS",
+                      "COVID-GBS", "COVID-no-GBS")))
+```
+
+### Reformat Data
+
+```{r}
+data_csf <- data_csf %>%
+  dplyr::filter(QC_Warning == "Pass") %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::mutate(scaled_NPX = scale(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::relocate(scaled_NPX, .after = "NPX") %>%
+  
+  ### Two Patient_03 Samples in CSF Data in one run (lets average it out)
+  dplyr::group_by(PatientID, Assay, Run) %>%
+  dplyr::mutate(scaled_NPX = mean(scaled_NPX)) %>%
+  dplyr::mutate(NPX = mean(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::distinct()
+
+dual_run_patients_csf <- data_csf %>%
+  dplyr::select(PatientID, Run) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(PatientID) %>%
+  dplyr::group_by(PatientID) %>%
+  dplyr::add_tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(n > 1) %>%
+  dplyr::select(PatientID) %>%
+  dplyr::distinct() %>%
+  .$PatientID
+```
+
+### Figure S6A
+
+```{r}
+marker <- "IL8" ### EDIT
+
+pdf(file = "../figures/FigureS6A.pdf", width = 8, height = 3)
+custom_corr_plots(
+  data = data_csf,
+  dual_run_patients = dual_run_patients_csf,
+  marker = marker
+)
+invisible(dev.off())
+
+rm(marker) # cleanup
+```

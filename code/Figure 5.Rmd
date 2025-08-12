@@ -1,0 +1,312 @@
+---
+title: "Figure 5"
+author: "Can Ulutekin"
+date: "2025-05-08"
+---
+
+### Cleanup
+
+```{r}
+rm(list = ls())
+```
+
+### Packages
+
+```{r}
+library(tidyverse)
+library(openxlsx)
+library(ggsignif)
+library(Boruta)
+library(ggh4x)
+library(egg)
+library(ggpmisc)
+library(caret)
+library(randomForest)
+library(pROC)
+library(ggside)
+```
+
+### Color Palettes
+
+```{r}
+cp_group <- c("#449489", "#457cd6", "#945F9C", "#e34262")
+cp_marker <- c("#5D9A3C", "#2AC6C3", "#CB6CB3", "#E29140")
+```
+
+### Load Data
+
+```{r}
+data_csf <- read.xlsx(xlsxFile = "../data/data_csf.xlsx")
+data_serum <- read.xlsx(xlsxFile = "../data/data_serum.xlsx")
+marker_class <- read.xlsx(xlsxFile = "../data/marker_class.xlsx")
+md <- read.xlsx(xlsxFile = "../data/meta_data.xlsx")
+
+all_markers <- sort.default(unique(data_csf$Assay))
+```
+
+### Reformat Meta Data
+
+```{r}
+marker_class <- marker_class %>%
+  dplyr::mutate(General.Classification = factor(
+    General.Classification,
+    levels = c("Signaling Molecules", "Cytokines",
+               "Chemokines", "Growth Factors and Others")))
+
+md <- md %>%
+  dplyr::mutate(Group = factor(
+    Group, levels = c("Neuropathy-no-GBS", "Control-GBS",
+                      "COVID-GBS", "COVID-no-GBS")))
+```
+
+### Reformat Data
+
+```{r}
+data_csf <- data_csf %>%
+  dplyr::filter(QC_Warning == "Pass") %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::mutate(scaled_NPX = scale(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::relocate(scaled_NPX, .after = "NPX") %>%
+  
+  ### Two Patient_03 Samples in CSF Data in one run (lets average it out)
+  dplyr::group_by(PatientID, Assay, Run) %>%
+  dplyr::mutate(scaled_NPX = mean(scaled_NPX)) %>%
+  dplyr::mutate(NPX = mean(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::distinct()
+
+data_serum <- data_serum %>%
+  dplyr::filter(QC_Warning == "Pass") %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::mutate(scaled_NPX = scale(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::relocate(scaled_NPX, .after = "NPX")
+
+dual_run_patients_csf <- data_csf %>%
+  dplyr::select(PatientID, Run) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(PatientID) %>%
+  dplyr::group_by(PatientID) %>%
+  dplyr::add_tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(n > 1) %>%
+  dplyr::select(PatientID) %>%
+  dplyr::distinct() %>%
+  .$PatientID
+
+dual_run_patients_serum <- data_serum %>%
+  dplyr::select(PatientID, Run) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(PatientID) %>%
+  dplyr::group_by(PatientID) %>%
+  dplyr::add_tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(n > 1) %>%
+  dplyr::select(PatientID) %>%
+  dplyr::distinct() %>%
+  .$PatientID
+```
+
+### Figure 5A
+
+```{r}
+### REFORMAT DATA
+data_rf <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Control-GBS", "COVID-GBS")))
+
+### Select Markers with Below LOD Frequencies Below 30%
+viable_markers <- data_rf %>%
+  dplyr::select(PatientID, Assay, NPX, LOD) %>%
+  dplyr::mutate(belowLOD = if_else(NPX < LOD, 1, 0, NA_real_)) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    belowLOD_count = sum(belowLOD),
+    total_count = n()
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(belowLOD_freq = 100 * belowLOD_count / total_count) %>%
+  dplyr::filter(belowLOD_freq <= 30) %>%
+  .$Assay
+
+data_rf <- data_rf %>%
+  dplyr::filter(Assay %in% viable_markers)
+
+data_rf <- data_rf %>%
+  dplyr::select(PatientID, Assay, scaled_NPX, Group) %>%
+  tidyr::pivot_wider(names_from = "Assay", values_from = "scaled_NPX") %>%
+  dplyr::select(-PatientID)
+
+set.seed(111)
+boruta_output <- Boruta(Group ~ ., data=data_rf, doTrace=2)
+
+pdf(file = "../figures/Figure5A.pdf", width = 10, height = 4)
+plot(boruta_output, cex.axis=.7, las=2, xlab="", main="Variable Importance")
+invisible(dev.off())
+
+rm(data_rf, viable_markers, boruta_output) # cleanup
+```
+
+### Figure 5B
+
+```{r}
+### REFORMAT DATA
+data_rf_input <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+   dplyr::mutate(Group = str_replace(Group, pattern = "-",
+                                            replacement = "_")) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Control_GBS", "COVID_GBS")))
+
+data_rf_input <- data_rf_input %>%
+  dplyr::filter(Assay %in% c("IL7", "EN-RAGE")) %>%
+  dplyr::select(PatientID, Group, Assay, scaled_NPX) %>%
+  tidyr::pivot_wider(names_from = "Assay", values_from = "scaled_NPX") %>%
+  dplyr::select(-PatientID)
+
+train_control <- trainControl(
+  method = "LOOCV", ### Leave-One-Out Cross-Validation
+  classProbs = TRUE, ### needed for ROC
+  summaryFunction = twoClassSummary, ### use ROC/Sens/Spec
+  savePredictions = "final" ### save final predictions for each fold
+)
+
+set.seed(123) ### for reproducibility
+rf_model <- train(
+  Group ~ .,
+  data = data_rf_input,
+  method = "rf",
+  metric = "ROC", ### optimize model based on ROC
+  trControl = train_control
+)
+
+# Access cross-validated predictions
+rf_predictions <- rf_model$pred
+
+roc_obj <- roc(
+  rf_predictions$obs, ### actual class
+  rf_predictions$COVID_GBS, ### predicted probability for class "pos"
+  levels = c("Control_GBS", "COVID_GBS") ### the order of levels: first negative, then positive
+)
+
+pdf("../figures/Figure5B.pdf", width = 5, height = 5)
+plot(
+  roc_obj,
+  col = "#1c61b6",
+  main = "Random Forest ROC Curve (LOOCV)",
+  xlim = c(1, 0),
+  ylim = c(0, 1),
+  legacy.axes = TRUE  # ensures x-axis goes left to right from 0 to 1
+)
+
+# Print AUC on the plot
+text(
+  x = 0.54,
+  y = 0.73,
+  labels = paste("AUC =", signif(auc(roc_obj), 3)), 
+  cex = 1.2
+)
+invisible(dev.off())
+
+rm(data_rf_input, train_control, rf_model, rf_predictions, roc_obj) # cleanup
+```
+
+### Figure 5C
+
+```{r}
+data_plot <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Control-GBS", "COVID-GBS"))) %>%
+  dplyr::select(PatientID, Assay, scaled_NPX, Group) %>%
+  tidyr::pivot_wider(names_from = "Assay", values_from = "scaled_NPX")
+
+p <- ggplot(data_plot) +
+  geom_point(aes(x = IL7, y = `EN-RAGE`, color = Group), size = 2) +
+  geom_xsideboxplot(aes(x = IL7, y = Group, fill = Group), orientation = "y") +
+  geom_ysideboxplot(aes(x = Group, y = `EN-RAGE`, fill = Group), orientation = "x") +
+  stat_ellipse(aes(x = IL7, y = `EN-RAGE`, col = Group), level = 0.8, linewidth = 1.5) +
+  scale_color_manual(values = cp_group[2:3]) +
+  scale_fill_manual(values = cp_group[2:3]) +
+  theme_bw() 
+
+pdf(file = "../figures/Figure5C.pdf",width = 6, height = 4)
+print(p)
+invisible(dev.off())
+
+rm(data_plot, p) # cleanup
+```
+
+### Figure 5D
+
+```{r}
+data_plot <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("COVID-no-GBS", "COVID-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("COVID-no-GBS", "COVID-GBS"))) %>%
+  dplyr::select(PatientID, Assay, scaled_NPX, Group) %>%
+  tidyr::pivot_wider(names_from = "Assay", values_from = "scaled_NPX")
+
+p <- ggplot(data_plot) +
+  geom_point(aes(x = TWEAK, y = `MCP-2`, color = Group), size = 2) +
+  geom_xsideboxplot(aes(x = TWEAK, y = Group, fill = Group), orientation = "y") +
+  geom_ysideboxplot(aes(x = Group, y = `MCP-2`, fill = Group), orientation = "x") +
+  stat_ellipse(aes(x = TWEAK, y = `MCP-2`, col = Group), level = 0.8, linewidth = 1.5) +
+  scale_color_manual(values = cp_group[4:3]) +
+  scale_fill_manual(values = cp_group[4:3]) +
+  theme_bw()
+
+pdf(file = "../figures/Figure5D.pdf",width = 7, height = 4)
+print(p)
+invisible(dev.off())
+
+rm(data_plot, p) # cleanup
+```
+
+### Figure 5E
+
+```{r}
+data_plot <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(Group %in% c("COVID-no-GBS", "COVID-GBS")) %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("COVID-no-GBS", "COVID-GBS"))) %>%
+  dplyr::select(PatientID, Assay, scaled_NPX, Group) %>%
+  dplyr::filter(Assay == "TWEAK")
+
+background_fill <- rep(list(element_rect(fill = "white")), 1)
+
+p <- ggplot(data_plot, aes(x = Group, y = scaled_NPX, fill = Group)) +
+  facet_wrap2(~Assay, strip = strip_nested(bleed = FALSE, background_x = background_fill)) +
+  geom_boxplot(outlier.alpha = 0) +
+  geom_jitter(width = 0.25, height = 0) +
+  geom_signif(comparisons = list(c("COVID-no-GBS", "COVID-GBS")),
+              test = "wilcox.test", tip_length = 0) +
+  scale_y_continuous(expand = expansion(mult = 0.08)) +
+  scale_fill_manual(values = cp_group[4:3]) +
+  ylab(label = "normalized protein abundance") +
+  guides(fill=guide_legend(title = "Patient Group")) +
+  theme_bw() +
+   theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+width_in_cm <- 3 ### EDIT
+height_in_cm <- 7 ### EDIT
+
+p_fixed <- set_panel_size(p, width  = unit(width_in_cm, "cm"),
+                          height = unit(height_in_cm, "cm"))
+
+ggsave(p_fixed, filename = "../figures/Figure5E.pdf", width = 5, height = 5)
+
+rm(data_plot, p, width_in_cm, height_in_cm, p_fixed) # cleanup
+```
