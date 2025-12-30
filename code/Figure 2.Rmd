@@ -1,0 +1,157 @@
+---
+title: "Figure 2"
+author: "Can Ulutekin"
+date: "2025-08-12"
+---
+
+### Cleanup
+
+```{r}
+rm(list = ls())
+```
+
+### Packages
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(openxlsx)
+library(viridis)
+```
+
+### Load Data
+
+pns_atlas_sub.rds is the full sural_seurat/pns_atlas.qs2 object from Heming et al but was subset to include only the conditions: VN, CIDP, OIN, CIAP, DPN, ONIN. VN, CIDP and OIN where classified as Inflammed and CIAP, DPN and ONIN where classified as Uninflammed.
+
+Cluster Abbreviations.xlsx is just an excel sheet that holds the general names of very specific clusters and where used to group clusters from the same cell type together.
+
+```{r}
+seu_obj_sub <- readRDS(file = "../data/Heming et al/pns_atlas_sub.rds")
+clust_abbv <- read.xlsx(xlsxFile = "../data/Heming et al/Cluster Abbreviations.xlsx")
+```
+
+### Merge Clusters With Same Cell Types
+
+```{r}
+meta_data <- seu_obj_sub@meta.data
+clust_order <- seu_obj_sub@misc$cluster_order
+clust_col <- seu_obj_sub@misc$cluster_col
+active_ident <- seu_obj_sub@active.ident
+
+clust_order <- unique(str_remove(clust_order, "[0-9]"))
+
+clust_col_to_remove <- c("periC2", "periC3", "PC2", "ven_capEC2", "Macro2")
+clust_col <- clust_col[!names(clust_col) %in% clust_col_to_remove]
+
+names(clust_col) <- str_remove(names(clust_col), "[0-9]")
+
+meta_data <- meta_data %>%
+  dplyr::mutate(cluster = str_remove(cluster, "[0-9]")) %>%
+  dplyr::mutate(cluster = factor(cluster, levels = clust_order))
+
+for (i in 1:length(clust_order)) {
+  clust_order[i] <- clust_abbv %>%
+    dplyr::filter(Abreviation == clust_order[i]) %>%
+    .$General.Name
+}
+clust_order <- unique(clust_order)
+
+clust_col_to_remove <- c("mySC", "repairSC", "damageSC", "endoC", "epiC", "venEC", "artEC", "LEC")
+clust_col <- clust_col[!names(clust_col) %in% clust_col_to_remove]
+
+names(clust_col) <- clust_order
+
+rownames_temp <- rownames(meta_data)
+
+meta_data <- meta_data %>%
+  dplyr::left_join(clust_abbv %>%
+                     dplyr::rename(cluster = Abreviation) %>%
+                     dplyr::select(cluster, General.Name),
+                   by = "cluster") %>%
+  dplyr::select(-cluster) %>%
+  dplyr::rename(cluster = General.Name) %>%
+  dplyr::relocate(cluster, .before = "level2") %>%
+  dplyr::mutate(cluster = factor(cluster, levels = clust_order))
+
+rownames(meta_data) <- rownames_temp
+
+seu_obj_sub@meta.data <- meta_data
+seu_obj_sub@misc$cluster_order <- clust_order
+seu_obj_sub@misc$cluster_col <- clust_col
+
+Idents(seu_obj_sub) <- seu_obj_sub@meta.data$cluster
+
+rm(meta_data, clust_order, clust_col, clust_col_to_remove, rownames_temp, i) # cleanup
+```
+
+### Figure 2A
+
+```{r}
+p <- DimPlot(
+  seu_obj_sub,
+  reduction = "umap.scvi.full",
+  pt.size = 0.1,
+  alpha = 0.1,
+  cols = seu_obj_sub@misc$cluster_col,
+  label = TRUE,
+  raster = FALSE
+) +
+  NoLegend() +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  xlab("UMAP1") +
+  ylab("UMAP2") +
+  coord_fixed()
+
+pdf("../figures/Figure2A.pdf")
+print(p)
+invisible(dev.off())
+
+png("../figures/Figure2A.png")
+print(p)
+invisible(dev.off())
+
+rm(p) # cleanup
+```
+
+### Figure 2B
+
+```{r}
+p <- Seurat::DotPlot(seu_obj_sub,
+                features = c("CXCL8", "CXCR1", "CXCR2"),
+                scale = TRUE) +
+  viridis::scale_color_viridis(option = "viridis") +
+  coord_flip() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_blank()
+  )
+
+pdf("../figures/Figure2B.pdf", width = 9, height = 4)
+print(p)
+invisible(dev.off())
+
+rm(p) # cleanup
+```
+
+### Figure 2C
+
+```{r}
+p <- Seurat::DotPlot(seu_obj_sub,
+                features = c("LIF", "LIFR", "IL6ST"),
+                scale = TRUE) +
+  viridis::scale_color_viridis(option = "viridis") +
+  coord_flip() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_blank()
+  )
+
+pdf("../figures/Figure2C.pdf", width = 9, height = 4)
+print(p)
+invisible(dev.off())
+
+rm(p) # cleanup
+```
