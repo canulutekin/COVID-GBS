@@ -1,7 +1,8 @@
 ---
 title: "Figure S3"
 author: "Can Ulutekin"
-date: "2025-08-12"
+date: "2026-01-13"
+output: html_document
 ---
 
 ### Cleanup
@@ -13,185 +14,544 @@ rm(list = ls())
 ### Packages
 
 ```{r}
-library(Seurat)
 library(tidyverse)
 library(openxlsx)
-library(viridis)
 library(ggrepel)
+library(ggh4x)
+library(egg)
+library(ggprism)
+library(viridis)
+```
+
+### Custom Functions
+
+```{r}
+custom_stats_unpaired <- function(expression, comp_group, comp1, comp2){
+  x <- expression[comp_group == comp1]
+  y <- expression[comp_group == comp2]
+  
+  if(length(x) == 0 | length(y) == 0){
+    return(NA_real_)
+  }
+  
+  result <- wilcox.test(x, y, paired = FALSE)
+  return(result$p.value)
+}
+```
+
+### Color Palettes
+
+```{r}
+cp_group <- c("#449489", "#457cd6", "#945F9C", "#e34262")
+cp_marker <- c("#5D9A3C", "#2AC6C3", "#CB6CB3", "#E29140")
 ```
 
 ### Load Data
 
-pns_atlas_sub.rds is the full sural_seurat/pns_atlas.qs2 object from Heming et al but was subset to include only the conditions: VN, CIDP, OIN, CIAP, DPN, ONIN. VN, CIDP and OIN where classified as Inflammed and CIAP, DPN and ONIN where classified as Uninflammed.
-
-Cluster Abbreviations.xlsx is just an excel sheet that holds the general names of very specific clusters and where used to group clusters from the same cell type together.
-
 ```{r}
-seu_obj_sub <- readRDS(file = "../data/Heming et al/pns_atlas_sub.rds")
-clust_abbv <- read.xlsx(xlsxFile = "../data/Heming et al/Cluster Abbreviations.xlsx")
+data_csf <- read.xlsx(xlsxFile = "../data/data_csf.xlsx")
+data_serum <- read.xlsx(xlsxFile = "../data/data_serum.xlsx")
+marker_class <- read.xlsx(xlsxFile = "../data/marker_class.xlsx")
+md <- readRDS(file = "../data/meta_data.rds")
+
+all_markers <- sort.default(unique(data_csf$Assay))
 ```
 
-### Merge Clusters With Same Cell Types
+### Reformat Meta Data
 
 ```{r}
-meta_data <- seu_obj_sub@meta.data
-clust_order <- seu_obj_sub@misc$cluster_order
-clust_col <- seu_obj_sub@misc$cluster_col
-active_ident <- seu_obj_sub@active.ident
+marker_class <- marker_class %>%
+  dplyr::mutate(General.Classification = factor(
+    General.Classification,
+    levels = c("Signaling Molecules", "Cytokines",
+               "Chemokines", "Growth Factors and Others")))
 
-clust_order <- unique(str_remove(clust_order, "[0-9]"))
+md <- md %>%
+  dplyr::mutate(Group = factor(
+    Group, levels = c("Control-GBS", "COVID-GBS",
+                      "COVID-no-GBS", "Neuropathy-no-GBS")))
 
-clust_col_to_remove <- c("periC2", "periC3", "PC2", "ven_capEC2", "Macro2")
-clust_col <- clust_col[!names(clust_col) %in% clust_col_to_remove]
-
-names(clust_col) <- str_remove(names(clust_col), "[0-9]")
-
-meta_data <- meta_data %>%
-  dplyr::mutate(cluster = str_remove(cluster, "[0-9]")) %>%
-  dplyr::mutate(cluster = factor(cluster, levels = clust_order))
-
-for (i in 1:length(clust_order)) {
-  clust_order[i] <- clust_abbv %>%
-    dplyr::filter(Abreviation == clust_order[i]) %>%
-    .$General.Name
-}
-clust_order <- unique(clust_order)
-
-clust_col_to_remove <- c("mySC", "repairSC", "damageSC", "endoC", "epiC", "venEC", "artEC", "LEC")
-clust_col <- clust_col[!names(clust_col) %in% clust_col_to_remove]
-
-names(clust_col) <- clust_order
-
-rownames_temp <- rownames(meta_data)
-
-meta_data <- meta_data %>%
-  dplyr::left_join(clust_abbv %>%
-                     dplyr::rename(cluster = Abreviation) %>%
-                     dplyr::select(cluster, General.Name),
-                   by = "cluster") %>%
-  dplyr::select(-cluster) %>%
-  dplyr::rename(cluster = General.Name) %>%
-  dplyr::relocate(cluster, .before = "level2") %>%
-  dplyr::mutate(cluster = factor(cluster, levels = clust_order))
-
-rownames(meta_data) <- rownames_temp
-
-seu_obj_sub@meta.data <- meta_data
-seu_obj_sub@misc$cluster_order <- clust_order
-seu_obj_sub@misc$cluster_col <- clust_col
-
-Idents(seu_obj_sub) <- seu_obj_sub@meta.data$cluster
-
-rm(meta_data, clust_order, clust_col, clust_col_to_remove, rownames_temp, i) # cleanup
+md <- md %>%
+  dplyr::mutate(GBS_IVIG_Treatment_timing = case_when(
+    `GBS.Treatment.=.IVIG:.yes.or.no.or` == "no" ~ "Untreated",
+    `GBS.Treatment.=.IVIG:.yes.or.no.or` == "yes" ~ as.character(`Sample.Collection.Before.or.After.Start.IVIG.Treatment:.Before.or.After.`),
+    .default = NA_character_
+  )) %>%
+  dplyr::mutate(GBS_PEX_Treatment_timing = case_when(
+    `GBS.Treatment.=.PEX.(plasmpaheresis):.yes.or.no.or` == "no" ~ "Untreated",
+    `GBS.Treatment.=.PEX.(plasmpaheresis):.yes.or.no.or` == "yes" ~ as.character(`Sample.Collection.Before.or.After.Start.PEX.Treatment:.Before.or.After.`),
+    .default = NA_character_
+  )) %>%
+  dplyr::mutate(
+    GBS_IVIG_Treatment_timing = factor(GBS_IVIG_Treatment_timing, levels = c("Untreated", "Before", "After")),
+    GBS_PEX_Treatment_timing = factor(GBS_PEX_Treatment_timing, levels = c("Untreated", "Before", "After"))
+  )
 ```
 
-### Figure S3A
+### Reformat Data
 
 ```{r}
-cluster.ids <- levels(Idents(seu_obj_sub))
+data_csf <- data_csf %>%
+  dplyr::filter(QC_Warning == "Pass") %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::mutate(scaled_NPX = scale(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::relocate(scaled_NPX, .after = "NPX") %>%
+  
+  ### Two Patient_03 Samples in CSF Data in one run (lets average it out)
+  dplyr::group_by(PatientID, Assay, Run) %>%
+  dplyr::mutate(scaled_NPX = mean(scaled_NPX)) %>%
+  dplyr::mutate(NPX = mean(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::distinct()
 
-cluster_markers <- lapply(cluster.ids, function(x) {
-  FindMarkers(
-    object = seu_obj_sub,
-    ident.1 = "Inflammed_subtypes",
-    ident.2 = "Uninflammed_subtypes",
-    group.by = "grouping",
-    subset.ident = x,
-    test.use = "wilcox",
-    min.pct = 0.10,
-    logfc.threshold = 0.25
+data_serum <- data_serum %>%
+  dplyr::filter(QC_Warning == "Pass") %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::mutate(scaled_NPX = scale(NPX)) %>%
+  dplyr::ungroup() %>%
+  dplyr::relocate(scaled_NPX, .after = "NPX")
+
+dual_run_patients_csf <- data_csf %>%
+  dplyr::select(PatientID, Run) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(PatientID) %>%
+  dplyr::group_by(PatientID) %>%
+  dplyr::add_tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(n > 1) %>%
+  dplyr::select(PatientID) %>%
+  dplyr::distinct() %>%
+  .$PatientID
+
+dual_run_patients_serum <- data_serum %>%
+  dplyr::select(PatientID, Run) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(PatientID) %>%
+  dplyr::group_by(PatientID) %>%
+  dplyr::add_tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(n > 1) %>%
+  dplyr::select(PatientID) %>%
+  dplyr::distinct() %>%
+  .$PatientID
+```
+
+### Figure S3A-CSF
+
+```{r}
+pc_chosen <- c(1, 2) ### EDIT
+
+PC_x <- paste0("PC", pc_chosen[1])
+PC_y <- paste0("PC", pc_chosen[2])
+
+### REFORMAT DATA
+data_pca <- data_csf %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_csf & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Neuropathy-no-GBS",
+                                                 "Control-GBS",
+                                                 "COVID-GBS",
+                                                 "COVID-no-GBS"))) %>%
+  dplyr::mutate(Cohort = factor(Cohort, levels = c("Zurich", "Bern",
+                                                   "Hebron", "Santa Pau")))
+
+### Select Markers for PCA with Below LOD Frequencies Below 30%
+viable_markers <- data_pca %>%
+  dplyr::select(PatientID, Assay, NPX, LOD) %>%
+  dplyr::mutate(belowLOD = if_else(NPX < LOD, 1, 0, NA_real_)) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    belowLOD_count = sum(belowLOD),
+    total_count = n()
   ) %>%
-  tibble::rownames_to_column("gene") %>%
-  dplyr::mutate(cluster = x)
-})
+  dplyr::ungroup() %>%
+  dplyr::mutate(belowLOD_freq = 100 * belowLOD_count / total_count) %>%
+  dplyr::filter(belowLOD_freq <= 30) %>%
+  .$Assay
 
-for (i in 1:length(cluster_markers)) {
-  if(i == 1){
-    data_pval <- cluster_markers[[i]] %>%
-      dplyr::filter(gene %in% c("CXCL8", "CXCR1", "CXCR2", "LIF", "LIFR", "IL6ST"))
-  } else {
-    data_pval_temp <- cluster_markers[[i]] %>%
-      dplyr::filter(gene %in% c("CXCL8", "CXCR1", "CXCR2", "LIF", "LIFR", "IL6ST"))
-    
-    data_pval <- data_pval %>%
-      dplyr::bind_rows(data_pval_temp)
-  }
-}
+### Generate PCA Input Data
+data_pca_input <- data_pca %>%
+  dplyr::filter(Assay %in% viable_markers) %>%
+  dplyr::select(PatientID, Cohort, Group, Assay, scaled_NPX) %>%
+  tidyr::pivot_wider(names_from = "Assay", values_from = "scaled_NPX")
 
-data_pval <- data_pval %>%
-  dplyr::mutate(gene_text = if_else(p_val_adj <= 0.05, gene, NA_character_, NA_character_)) %>%
-  dplyr::mutate(cluster_text = if_else(p_val_adj <= 0.05, cluster, NA_character_, NA_character_))
+### Convert to Matrix
+mat_pca_input <- data_pca_input %>%
+  dplyr::select(c(PatientID, all_of(viable_markers))) %>%
+  tibble::column_to_rownames(var = "PatientID") %>%
+  as.matrix()
 
-p <- ggplot(data_pval,
-       aes(x = avg_log2FC, y = -log10(p_val_adj))) +
-  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
-  geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed") +
-  geom_point(aes(fill = cluster_text), shape = 21, col = "black") +
-  geom_label_repel(aes(fill = cluster_text, label = gene_text)) +
-  scale_color_manual(values = seu_obj_sub@misc[["cluster_col"]]) +
-  scale_fill_manual(values = seu_obj_sub@misc[["cluster_col"]]) +
-  theme_bw()
+### Run PCA
+pca <- prcomp(mat_pca_input)
 
-pdf(file = "../figures/FigureS3A.pdf", height = 5)
+### PCA Output
+var_explained <- pca$sdev^2 / sum(pca$sdev^2)
+
+data_pca_output <- data.frame(PatientID=row.names(pca$x), pca$x)
+
+### Plot PCA
+data_plot <- data_pca_output %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::left_join(data_pca_input %>%
+                     dplyr::select(PatientID) %>%
+                     dplyr::distinct(),
+                   by = "PatientID") %>%
+  dplyr::mutate(Cohort = factor(Cohort, levels = c("Zurich", "Bern", "Hebron", "Santa Pau"))) %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS"))
+
+data_plot <- data_plot %>%
+  dplyr::mutate(Group2 = "All GBS")
+
+rect_list_1 <- rep(list(element_rect(fill = "#457cd6")), 1)
+rect_list_2 <- rep(list(element_rect(fill = "#945F9C")), 0)
+# rect_list_3 <- rep(list(element_rect(fill = "#e34262")), 1)
+# rect_list_4 <- rep(list(element_rect(fill = "#449489")), 1)
+rect_list_5 <- rep(list(element_rect(fill = "white")), 1000) ### For the markers
+
+# Combine the lists into a single list
+background_fill <- c(rect_list_1, rect_list_2, rect_list_5) # rect_list_3, rect_list_4,
+
+p <- ggplot(data_plot, aes(x = get(PC_x), y = get(PC_y))) +
+  facet_wrap2(~Group2, nrow = 1,
+              strip = strip_nested(bleed = FALSE, background_x = background_fill,
+                                   text_x = element_text(size = 16.5))) +
+  geom_hline(yintercept = 0, linewidth=.2, col = "gray") +
+  geom_vline(xintercept = 0, linewidth=.2, col = "gray") +
+  geom_point(aes(fill = GBS_IVIG_Treatment_timing, shape = Group), 
+             size = 5, stroke = 1.2, color = "black") +
+  coord_fixed() +
+  labs(fill = "Sampling relative to IVIG", shape = "Group") +
+  xlab(label = paste0(PC_x, " (", round(100 * var_explained[pc_chosen[1]], digits = 1), "%)")) +
+  ylab(label = paste0(PC_y, " (", round(100 * var_explained[pc_chosen[2]], digits = 1), "%)")) +
+  scale_shape_manual(values = c("Control-GBS" = 22, "COVID-GBS" = 23)) +
+  scale_fill_manual(values = c("#4f7ebb", "#865E7E", "#bc3d41")) +
+  guides(fill = guide_legend(override.aes = list(shape = 21))) + 
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.text = element_text(size = 15),
+        axis.title = element_text(size = 18))
+
+pdf(file = "../figures/FigureS3A-CSF.pdf", width = 14, height = 3.47)
 print(p)
 invisible(dev.off())
 
-rm(cluster.ids, i, data_pval_temp, p) # cleanup
+rm(data_pca, data_pca_input, data_pca_output, data_plot, mat_pca_input, p, pca,
+   var_explained, viable_markers, pc_chosen, PC_x, PC_y, background_fill) # cleanup
+rm(list = ls(pattern = "rect_list_")) # cleanup
 ```
 
-### Figure S3B
+### Figure S3A-Serum
 
 ```{r}
-p_comb <- Seurat::DotPlot(seu_obj_sub,
-                          features = c("LIF", "LIFR", "IL6ST")) +
-  viridis::scale_color_viridis(option = "viridis") +
-  coord_flip() +
-  ggtitle(label = "Combined") +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    axis.title.x = element_blank()
-  )
+pc_chosen <- c(1, 2) ### EDIT
 
-p_uninflammed <- Seurat::DotPlot(subset(seu_obj_sub, subset = grouping == "Uninflammed_subtypes"),
-                                 features = c("LIF", "LIFR", "IL6ST")) +
-  scale_color_viridis(
-    option = "viridis",
-    limits = c(-1.5, 2.5),
-    oob = scales::squish
-  ) +
-  scale_size_area(
-    limits = range(p_comb$data$pct.exp, na.rm = TRUE),
-    oob = scales::squish
-  ) +
-  coord_flip() +
-  ggtitle(label = "Uninflammed") +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    axis.title.x = element_blank()
-  )
+PC_x <- paste0("PC", pc_chosen[1])
+PC_y <- paste0("PC", pc_chosen[2])
 
-p_inflammed <- Seurat::DotPlot(subset(seu_obj_sub, subset = grouping == "Inflammed_subtypes"),
-                               features = c("LIF", "LIFR", "IL6ST")) +
-  scale_color_viridis(
-    option = "viridis",
-    limits = c(-1.5, 2.5),
-    oob = scales::squish
-  ) +
-  scale_size_area(
-    limits = range(p_comb$data$pct.exp, na.rm = TRUE),
-    oob = scales::squish
-  ) +
-  coord_flip() +
-  ggtitle(label = "Inflammed") +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    axis.title.x = element_blank()
-  )
+### REFORMAT DATA
+data_pca <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Neuropathy-no-GBS",
+                                                 "Control-GBS",
+                                                 "COVID-GBS",
+                                                 "COVID-no-GBS"))) %>%
+  dplyr::mutate(Cohort = factor(Cohort, levels = c("Zurich", "Bern",
+                                                   "Hebron", "Santa Pau")))
 
-pdf(file = "../figures/FigureS3B.pdf", width = 9, height = 4)
-print(p_uninflammed)
-print(p_inflammed)
+### Select Markers for PCA with Below LOD Frequencies Below 30%
+viable_markers <- data_pca %>%
+  dplyr::select(PatientID, Assay, NPX, LOD) %>%
+  dplyr::mutate(belowLOD = if_else(NPX < LOD, 1, 0, NA_real_)) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    belowLOD_count = sum(belowLOD),
+    total_count = n()
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(belowLOD_freq = 100 * belowLOD_count / total_count) %>%
+  dplyr::filter(belowLOD_freq <= 30) %>%
+  .$Assay
+
+### Generate PCA Input Data
+data_pca_input <- data_pca %>%
+  dplyr::filter(Assay %in% viable_markers) %>%
+  dplyr::select(PatientID, Cohort, Group, Assay, scaled_NPX) %>%
+  tidyr::pivot_wider(names_from = "Assay", values_from = "scaled_NPX")
+
+### Convert to Matrix
+mat_pca_input <- data_pca_input %>%
+  dplyr::select(c(PatientID, all_of(viable_markers))) %>%
+  tibble::column_to_rownames(var = "PatientID") %>%
+  as.matrix()
+
+### Run PCA
+pca <- prcomp(mat_pca_input)
+
+### PCA Output
+var_explained <- pca$sdev^2 / sum(pca$sdev^2)
+
+data_pca_output <- data.frame(PatientID=row.names(pca$x), pca$x)
+
+### Plot PCA
+data_plot <- data_pca_output %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::left_join(data_pca_input %>%
+                     dplyr::select(PatientID) %>%
+                     dplyr::distinct(),
+                   by = "PatientID") %>%
+  dplyr::mutate(Cohort = factor(Cohort, levels = c("Zurich", "Bern", "Hebron", "Santa Pau"))) %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS"))
+
+data_plot <- data_plot %>%
+  dplyr::mutate(Group2 = "All GBS")
+
+rect_list_1 <- rep(list(element_rect(fill = "#457cd6")), 1)
+rect_list_2 <- rep(list(element_rect(fill = "#945F9C")), 0)
+# rect_list_3 <- rep(list(element_rect(fill = "#e34262")), 1)
+# rect_list_4 <- rep(list(element_rect(fill = "#449489")), 1)
+rect_list_5 <- rep(list(element_rect(fill = "white")), 1000) ### For the markers
+
+# Combine the lists into a single list
+background_fill <- c(rect_list_1, rect_list_2, rect_list_5) # rect_list_3, rect_list_4,
+
+p <- ggplot(data_plot, aes(x = get(PC_x), y = get(PC_y))) +
+  facet_wrap2(~Group2, nrow = 1,
+              strip = strip_nested(bleed = FALSE, background_x = background_fill,
+                                   text_x = element_text(size = 16.5))) +
+  geom_hline(yintercept = 0, linewidth=.2, col = "gray") +
+  geom_vline(xintercept = 0, linewidth=.2, col = "gray") +
+  geom_point(aes(fill = GBS_IVIG_Treatment_timing, shape = Group), 
+             size = 5, stroke = 1.2, color = "black") +
+  coord_fixed() +
+  labs(fill = "Sampling relative to IVIG", shape = "Group") +
+  xlab(label = paste0(PC_x, " (", round(100 * var_explained[pc_chosen[1]], digits = 1), "%)")) +
+  ylab(label = paste0(PC_y, " (", round(100 * var_explained[pc_chosen[2]], digits = 1), "%)")) +
+  scale_shape_manual(values = c("Control-GBS" = 22, "COVID-GBS" = 23)) +
+  scale_fill_manual(values = c("#4f7ebb", "#865E7E", "#bc3d41")) +
+  guides(fill = guide_legend(override.aes = list(shape = 21))) + 
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.text = element_text(size = 15),
+        axis.title = element_text(size = 18))
+
+pdf(file = "../figures/FigureS3A-Serum.pdf", width = 14, height = 3.47)
+print(p)
 invisible(dev.off())
 
-rm(p_comb, p_uninflammed, p_inflammed) # cleanup
+rm(data_pca, data_pca_input, data_pca_output, data_plot, mat_pca_input, p, pca, var_explained, viable_markers, pc_chosen, PC_x, PC_y, background_fill) # cleanup
+rm(list = ls(pattern = "rect_list_")) # cleanup
+```
+
+### Figure S3B-CSF
+
+```{r}
+pc_chosen <- c(1, 2) ### EDIT
+
+PC_x <- paste0("PC", pc_chosen[1])
+PC_y <- paste0("PC", pc_chosen[2])
+
+### REFORMAT DATA
+data_pca <- data_csf %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_csf & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Neuropathy-no-GBS",
+                                                 "Control-GBS",
+                                                 "COVID-GBS",
+                                                 "COVID-no-GBS"))) %>%
+  dplyr::mutate(Cohort = factor(Cohort, levels = c("Zurich", "Bern",
+                                                   "Hebron", "Santa Pau")))
+
+### Select Markers for PCA with Below LOD Frequencies Below 30%
+viable_markers <- data_pca %>%
+  dplyr::select(PatientID, Assay, NPX, LOD) %>%
+  dplyr::mutate(belowLOD = if_else(NPX < LOD, 1, 0, NA_real_)) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    belowLOD_count = sum(belowLOD),
+    total_count = n()
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(belowLOD_freq = 100 * belowLOD_count / total_count) %>%
+  dplyr::filter(belowLOD_freq <= 30) %>%
+  .$Assay
+
+### Generate PCA Input Data
+data_pca_input <- data_pca %>%
+  dplyr::filter(Assay %in% viable_markers) %>%
+  dplyr::select(PatientID, Cohort, Group, Assay, scaled_NPX) %>%
+  tidyr::pivot_wider(names_from = "Assay", values_from = "scaled_NPX")
+
+### Convert to Matrix
+mat_pca_input <- data_pca_input %>%
+  dplyr::select(c(PatientID, all_of(viable_markers))) %>%
+  tibble::column_to_rownames(var = "PatientID") %>%
+  as.matrix()
+
+### Run PCA
+pca <- prcomp(mat_pca_input)
+
+### PCA Output
+var_explained <- pca$sdev^2 / sum(pca$sdev^2)
+
+data_pca_output <- data.frame(PatientID=row.names(pca$x), pca$x)
+
+### Plot PCA
+data_plot <- data_pca_output %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::left_join(data_pca_input %>%
+                     dplyr::select(PatientID) %>%
+                     dplyr::distinct(),
+                   by = "PatientID") %>%
+  dplyr::mutate(Cohort = factor(Cohort, levels = c("Zurich", "Bern", "Hebron", "Santa Pau"))) %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS"))
+
+data_plot <- data_plot %>%
+  dplyr::mutate(Group2 = "All GBS")
+
+rect_list_1 <- rep(list(element_rect(fill = "#457cd6")), 1)
+rect_list_2 <- rep(list(element_rect(fill = "#945F9C")), 0)
+# rect_list_3 <- rep(list(element_rect(fill = "#e34262")), 1)
+# rect_list_4 <- rep(list(element_rect(fill = "#449489")), 1)
+rect_list_5 <- rep(list(element_rect(fill = "white")), 1000) ### For the markers
+
+# Combine the lists into a single list
+background_fill <- c(rect_list_1, rect_list_2, rect_list_5) # rect_list_3, rect_list_4,
+
+p <- ggplot(data_plot, aes(x = get(PC_x), y = get(PC_y))) +
+  facet_wrap2(~Group2, nrow = 1,
+              strip = strip_nested(bleed = FALSE, background_x = background_fill,
+                                   text_x = element_text(size = 16.5))) +
+  geom_hline(yintercept = 0, linewidth=.2, col = "gray") +
+  geom_vline(xintercept = 0, linewidth=.2, col = "gray") +
+  geom_point(aes(fill = GBS_PEX_Treatment_timing, shape = Group), 
+             size = 5, stroke = 1.2, color = "black") +
+  coord_fixed() +
+  labs(fill = "Sampling relative to PEX", shape = "Group") +
+  xlab(label = paste0(PC_x, " (", round(100 * var_explained[pc_chosen[1]], digits = 1), "%)")) +
+  ylab(label = paste0(PC_y, " (", round(100 * var_explained[pc_chosen[2]], digits = 1), "%)")) +
+  scale_shape_manual(values = c("Control-GBS" = 22, "COVID-GBS" = 23)) +
+  scale_fill_manual(values = c("#4f7ebb", "#865E7E", "#bc3d41")) +
+  guides(fill = guide_legend(override.aes = list(shape = 21))) + 
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.text = element_text(size = 15),
+        axis.title = element_text(size = 18))
+
+pdf(file = "../figures/FigureS3B-CSF.pdf", width = 14, height = 3.47)
+print(p)
+invisible(dev.off())
+
+rm(data_pca, data_pca_input, data_pca_output, data_plot, mat_pca_input, p, pca,
+   var_explained, viable_markers, pc_chosen, PC_x, PC_y, background_fill) # cleanup
+rm(list = ls(pattern = "rect_list_")) # cleanup
+```
+
+### Figure S3B-Serum
+
+```{r}
+pc_chosen <- c(1, 2) ### EDIT
+
+PC_x <- paste0("PC", pc_chosen[1])
+PC_y <- paste0("PC", pc_chosen[2])
+
+### REFORMAT DATA
+data_pca <- data_serum %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::filter(!(PatientID %in% dual_run_patients_serum & Run == 2)) %>%
+  dplyr::mutate(Group = factor(Group, levels = c("Neuropathy-no-GBS",
+                                                 "Control-GBS",
+                                                 "COVID-GBS",
+                                                 "COVID-no-GBS"))) %>%
+  dplyr::mutate(Cohort = factor(Cohort, levels = c("Zurich", "Bern",
+                                                   "Hebron", "Santa Pau")))
+
+### Select Markers for PCA with Below LOD Frequencies Below 30%
+viable_markers <- data_pca %>%
+  dplyr::select(PatientID, Assay, NPX, LOD) %>%
+  dplyr::mutate(belowLOD = if_else(NPX < LOD, 1, 0, NA_real_)) %>%
+  dplyr::group_by(Assay) %>%
+  dplyr::summarise(
+    belowLOD_count = sum(belowLOD),
+    total_count = n()
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(belowLOD_freq = 100 * belowLOD_count / total_count) %>%
+  dplyr::filter(belowLOD_freq <= 30) %>%
+  .$Assay
+
+### Generate PCA Input Data
+data_pca_input <- data_pca %>%
+  dplyr::filter(Assay %in% viable_markers) %>%
+  dplyr::select(PatientID, Cohort, Group, Assay, scaled_NPX) %>%
+  tidyr::pivot_wider(names_from = "Assay", values_from = "scaled_NPX")
+
+### Convert to Matrix
+mat_pca_input <- data_pca_input %>%
+  dplyr::select(c(PatientID, all_of(viable_markers))) %>%
+  tibble::column_to_rownames(var = "PatientID") %>%
+  as.matrix()
+
+### Run PCA
+pca <- prcomp(mat_pca_input)
+
+### PCA Output
+var_explained <- pca$sdev^2 / sum(pca$sdev^2)
+
+data_pca_output <- data.frame(PatientID=row.names(pca$x), pca$x)
+
+### Plot PCA
+data_plot <- data_pca_output %>%
+  dplyr::left_join(md, by = "PatientID") %>%
+  dplyr::left_join(data_pca_input %>%
+                     dplyr::select(PatientID) %>%
+                     dplyr::distinct(),
+                   by = "PatientID") %>%
+  dplyr::mutate(Cohort = factor(Cohort, levels = c("Zurich", "Bern", "Hebron", "Santa Pau"))) %>%
+  dplyr::filter(Group %in% c("Control-GBS", "COVID-GBS"))
+
+data_plot <- data_plot %>%
+  dplyr::mutate(Group2 = "All GBS")
+
+rect_list_1 <- rep(list(element_rect(fill = "#457cd6")), 1)
+rect_list_2 <- rep(list(element_rect(fill = "#945F9C")), 0)
+# rect_list_3 <- rep(list(element_rect(fill = "#e34262")), 1)
+# rect_list_4 <- rep(list(element_rect(fill = "#449489")), 1)
+rect_list_5 <- rep(list(element_rect(fill = "white")), 1000) ### For the markers
+
+# Combine the lists into a single list
+background_fill <- c(rect_list_1, rect_list_2, rect_list_5) # rect_list_3, rect_list_4,
+
+p <- ggplot(data_plot, aes(x = get(PC_x), y = get(PC_y))) +
+  facet_wrap2(~Group2, nrow = 1,
+              strip = strip_nested(bleed = FALSE, background_x = background_fill,
+                                   text_x = element_text(size = 16.5))) +
+  geom_hline(yintercept = 0, linewidth=.2, col = "gray") +
+  geom_vline(xintercept = 0, linewidth=.2, col = "gray") +
+  geom_point(aes(fill = GBS_PEX_Treatment_timing, shape = Group), 
+             size = 5, stroke = 1.2, color = "black") +
+  coord_fixed() +
+  labs(fill = "Sampling relative to PEX", shape = "Group") +
+  xlab(label = paste0(PC_x, " (", round(100 * var_explained[pc_chosen[1]], digits = 1), "%)")) +
+  ylab(label = paste0(PC_y, " (", round(100 * var_explained[pc_chosen[2]], digits = 1), "%)")) +
+  scale_shape_manual(values = c("Control-GBS" = 22, "COVID-GBS" = 23)) +
+  scale_fill_manual(values = c("#4f7ebb", "#865E7E", "#bc3d41")) +
+  guides(fill = guide_legend(override.aes = list(shape = 21))) + 
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.text = element_text(size = 15),
+        axis.title = element_text(size = 18))
+
+pdf(file = "../figures/FigureS3B-Serum.pdf", width = 14, height = 3.47)
+print(p)
+invisible(dev.off())
+
+rm(data_pca, data_pca_input, data_pca_output, data_plot, mat_pca_input, p, pca,
+   var_explained, viable_markers, pc_chosen, PC_x, PC_y, background_fill) # cleanup
+rm(list = ls(pattern = "rect_list_")) # cleanup
 ```
